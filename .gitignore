@@ -1,0 +1,56 @@
+HELP.md
+target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### Local environment and secrets ###
+.env
+.env.*
+
+### Logs and temporary files ###
+*.log
+logs/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+### Operating system files ###
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+### Local Codex configuration and skills ###
+.codex/
+
+### Markdown stays local except for the root README ###
+*.md
+!/README.md
