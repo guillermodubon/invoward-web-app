@@ -1,5 +1,9 @@
 package io.github.guillermodubon.invoward;
 
+import io.github.guillermodubon.invoward.notification.application.port.EmailSender;
+import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProvider;
+import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProperties;
+import io.github.guillermodubon.invoward.notification.infrastructure.email.disabled.DisabledEmailSender;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -8,6 +12,7 @@ import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @SpringBootTest(properties = {
@@ -42,6 +47,12 @@ class InvoWardApplicationTests {
     @Test
     void actuatorHealthEndpointIsPresent() {
         assertNotNull(applicationContext.getBean(HealthEndpoint.class));
+    }
+
+    @Test
+    void transactionalEmailIsDisabledByDefault() {
+        assertEquals(EmailProvider.DISABLED, applicationContext.getBean(EmailProperties.class).provider());
+        assertInstanceOf(DisabledEmailSender.class, applicationContext.getBean(EmailSender.class));
     }
 
 }
