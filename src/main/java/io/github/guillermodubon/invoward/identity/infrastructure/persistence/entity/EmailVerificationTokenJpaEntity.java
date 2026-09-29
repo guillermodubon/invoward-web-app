@@ -11,6 +11,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -44,21 +45,31 @@ public class EmailVerificationTokenJpaEntity {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
+    public static EmailVerificationTokenJpaEntity createRegistration(
+            UUID userId,
+            String normalizedTargetEmail,
+            String tokenHash,
+            Instant createdAt,
+            Instant expiresAt) {
+        EmailVerificationTokenJpaEntity entity = new EmailVerificationTokenJpaEntity();
+        entity.userId = Objects.requireNonNull(userId, "userId must not be null");
+        entity.targetEmail = Objects.requireNonNull(normalizedTargetEmail,
+                "normalizedTargetEmail must not be null");
+        entity.tokenHash = Objects.requireNonNull(tokenHash, "tokenHash must not be null");
+        entity.purpose = EmailVerificationPurpose.REGISTRATION;
+        entity.createdAt = Objects.requireNonNull(createdAt, "createdAt must not be null");
+        entity.expiresAt = Objects.requireNonNull(expiresAt, "expiresAt must not be null");
+        return entity;
+    }
+
     public UUID getId() { return id; }
     public UUID getUserId() { return userId; }
-    public void setUserId(UUID userId) { this.userId = userId; }
     public String getTokenHash() { return tokenHash; }
-    public void setTokenHash(String tokenHash) { this.tokenHash = tokenHash; }
     public EmailVerificationPurpose getPurpose() { return purpose; }
-    public void setPurpose(EmailVerificationPurpose purpose) { this.purpose = purpose; }
     public String getTargetEmail() { return targetEmail; }
-    public void setTargetEmail(String targetEmail) { this.targetEmail = targetEmail; }
     public Instant getExpiresAt() { return expiresAt; }
-    public void setExpiresAt(Instant expiresAt) { this.expiresAt = expiresAt; }
     public Instant getUsedAt() { return usedAt; }
-    public void setUsedAt(Instant usedAt) { this.usedAt = usedAt; }
     public Instant getCreatedAt() { return createdAt; }
-    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 
     protected EmailVerificationTokenJpaEntity() {
     }

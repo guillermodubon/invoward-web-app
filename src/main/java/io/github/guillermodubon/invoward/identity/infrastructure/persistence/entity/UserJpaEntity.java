@@ -12,6 +12,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -49,22 +50,34 @@ public class UserJpaEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    public static UserJpaEntity createPendingRegistration(
+            String displayName,
+            String email,
+            String passwordHash,
+            Instant createdAt) {
+        Objects.requireNonNull(createdAt, "createdAt must not be null");
+
+        UserJpaEntity entity = new UserJpaEntity();
+        entity.displayName = displayName;
+        entity.email = email;
+        entity.passwordHash = passwordHash;
+        entity.emailVerified = false;
+        entity.status = UserStatus.PENDING_VERIFICATION;
+        entity.version = 0;
+        entity.createdAt = createdAt;
+        entity.updatedAt = createdAt;
+        return entity;
+    }
+
     public UUID getId() { return id; }
     public String getDisplayName() { return displayName; }
-    public void setDisplayName(String displayName) { this.displayName = displayName; }
     public String getEmail() { return email; }
-    public void setEmail(String email) { this.email = email; }
     public String getPasswordHash() { return passwordHash; }
-    public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
     public boolean isEmailVerified() { return emailVerified; }
-    public void setEmailVerified(boolean emailVerified) { this.emailVerified = emailVerified; }
     public UserStatus getStatus() { return status; }
-    public void setStatus(UserStatus status) { this.status = status; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }
-    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
-    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
 
     protected UserJpaEntity() {
     }

@@ -4,12 +4,15 @@ import io.github.guillermodubon.invoward.notification.application.port.EmailSend
 import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProvider;
 import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProperties;
 import io.github.guillermodubon.invoward.notification.infrastructure.email.disabled.DisabledEmailSender;
+import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
+import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.health.actuate.endpoint.HealthEndpoint;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -22,6 +25,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
                 + "org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration"
 })
 class InvoWardApplicationTests {
+
+    @MockitoBean
+    private SpringDataUserJpaRepository userJpaRepository;
+
+    @MockitoBean
+    private SpringDataEmailVerificationTokenJpaRepository emailVerificationTokenJpaRepository;
 
     @Autowired
     private ApplicationContext applicationContext;
