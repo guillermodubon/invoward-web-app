@@ -1,6 +1,7 @@
 package io.github.guillermodubon.invoward.identity.api;
 
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
+import io.github.guillermodubon.invoward.identity.infrastructure.security.AuthenticatedUserPrincipal;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -8,9 +9,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.core.session.SessionInformation;
+import org.springframework.security.core.session.SessionRegistry;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -25,7 +27,10 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(
@@ -36,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         })
 class SessionSecurityRegressionIT {
 
-    private static final PostgreSQLContainer POSTGRES = PostgresTestContainer.instance();
     private static final String SESSION_COOKIE = "INVOWARD_SESSION";
     private static final String RAW_PASSWORD = "correct horse battery staple";
     private static final String CSRF_INVALID =
@@ -57,6 +61,9 @@ class SessionSecurityRegressionIT {
 
     @Autowired
     private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private SessionRegistry sessionRegistry;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -126,6 +133,49 @@ class SessionSecurityRegressionIT {
         HttpResponse<String> meAfterLogout = get(baseUri, "/api/auth/me", authenticatedCookie);
         assertEquals(401, meAfterLogout.statusCode());
         assertEquals(AUTHENTICATION_REQUIRED, meAfterLogout.body());
+        assertNull(sessionRegistry.getSessionInformation(authenticatedCookie));
+    }
+
+    @Test
+    void registeredAndExpiredSessionReceivesGenericJsonUnauthorizedResponse() throws Exception {
+        String email = "expired-session-" + UUID.randomUUID() + "@example.com";
+        UUID userId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                INSERT INTO invoward.users
+                    (id, display_name, email, password_hash, email_verified, status)
+                VALUES (?, 'Expired Session User', ?, ?, true, ?)
+                """, userId, email, passwordEncoder.encode(RAW_PASSWORD), UserStatus.ACTIVE.name());
+
+        URI baseUri = URI.create("http://localhost:" + environment.getRequiredProperty("local.server.port"));
+        HttpResponse<String> csrfResponse = get(baseUri, "/api/auth/csrf", null);
+        JsonNode csrf = objectMapper.readTree(csrfResponse.body());
+        String preAuthenticationCookie = sessionCookieValue(csrfResponse);
+        HttpResponse<String> loginResponse = postJson(
+                baseUri,
+                "/api/auth/login",
+                preAuthenticationCookie,
+                csrf.get("headerName").asString(),
+                csrf.get("token").asString(),
+                objectMapper.writeValueAsString(Map.of("email", email, "password", RAW_PASSWORD)));
+        assertEquals(200, loginResponse.statusCode());
+
+        String sessionCookie = sessionCookieValue(loginResponse);
+        SessionInformation sessionInformation = sessionRegistry.getSessionInformation(sessionCookie);
+        assertNotNull(sessionInformation);
+        assertInstanceOf(AuthenticatedUserPrincipal.class, sessionInformation.getPrincipal());
+        assertEquals(userId, ((AuthenticatedUserPrincipal) sessionInformation.getPrincipal()).userId());
+
+        sessionInformation.expireNow();
+        HttpResponse<String> expiredSessionResponse = get(baseUri, "/api/auth/me", sessionCookie);
+
+        assertEquals(401, expiredSessionResponse.statusCode());
+        assertEquals(
+                "{\"code\":\"SESSION_INVALIDATED\",\"message\":"
+                        + "\"Your session is no longer valid. Please sign in again.\"}",
+                expiredSessionResponse.body());
+        assertFalse(expiredSessionResponse.body().contains(sessionCookie));
+        assertFalse(expiredSessionResponse.body().toLowerCase(Locale.ROOT).contains("session id"));
+        assertNull(expiredSessionResponse.headers().firstValue("Location").orElse(null));
     }
 
     private HttpResponse<String> get(URI baseUri, String path, String sessionCookie) throws Exception {
@@ -190,8 +240,6 @@ class SessionSecurityRegressionIT {
 
     @DynamicPropertySource
     static void configureDatabase(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES::getUsername);
-        registry.add("spring.datasource.password", POSTGRES::getPassword);
+        PostgresTestContainer.configure(registry);
     }
 }

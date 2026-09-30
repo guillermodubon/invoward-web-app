@@ -84,11 +84,8 @@ class DatabaseMigrationAndMappingIT {
         application.setWebApplicationType(WebApplicationType.NONE);
         application.setBannerMode(org.springframework.boot.Banner.Mode.OFF);
         application.setLogStartupInfo(false);
-        return application.run(
-                "--spring.datasource.url=" + POSTGRES.getJdbcUrl(),
-                "--spring.datasource.username=" + POSTGRES.getUsername(),
-                "--spring.datasource.password=" + POSTGRES.getPassword(),
-                "--spring.security.user.password=test-only");
+        return application.run(PostgresTestContainer.applicationArguments(
+                "--spring.security.user.password=test-only"));
     }
 
     private static void assertApplicationPersistenceContext(

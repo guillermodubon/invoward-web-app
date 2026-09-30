@@ -15,7 +15,6 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
-import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -40,7 +39,6 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 class LoginSessionIntegrationIT {
 
-    private static final PostgreSQLContainer POSTGRES = PostgresTestContainer.instance();
     private static final String RAW_PASSWORD = "correct horse battery staple";
     private static final String AUTHENTICATION_FAILED = """
             {"code":"AUTHENTICATION_FAILED","message":"Invalid email or password."}
@@ -240,8 +238,6 @@ class LoginSessionIntegrationIT {
 
     @DynamicPropertySource
     static void configureDatabase(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
-        registry.add("spring.datasource.username", POSTGRES::getUsername);
-        registry.add("spring.datasource.password", POSTGRES::getPassword);
+        PostgresTestContainer.configure(registry);
     }
 }
