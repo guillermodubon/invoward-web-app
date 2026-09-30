@@ -2,7 +2,10 @@ package io.github.guillermodubon.invoward.identity.infrastructure.security;
 
 import io.github.guillermodubon.invoward.identity.domain.UserAccount;
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
+import io.github.guillermodubon.invoward.identity.application.model.CurrentAccount;
+import io.github.guillermodubon.invoward.identity.application.service.CurrentAccountService;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
+import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import jakarta.servlet.Filter;
 import org.junit.jupiter.api.Test;
@@ -17,11 +20,15 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.session.SessionInformation;
+import org.springframework.security.core.session.SessionRegistry;
+import org.springframework.security.core.session.SessionRegistryImpl;
 import org.springframework.security.web.FilterChainProxy;
 import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.LogoutFilter;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
+import org.springframework.security.web.session.ConcurrentSessionFilter;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
@@ -31,6 +38,7 @@ import org.springframework.security.web.authentication.session.CompositeSessionA
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.security.access.AccessDeniedException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -46,9 +54,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.when;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -67,6 +77,12 @@ class SecurityConfigurationTest {
 
     @MockitoBean
     private SpringDataEmailVerificationTokenJpaRepository emailVerificationTokenJpaRepository;
+
+    @MockitoBean
+    private SpringDataPasswordResetTokenJpaRepository passwordResetTokenJpaRepository;
+
+    @MockitoBean
+    private CurrentAccountService currentAccountService;
 
     @Autowired
     private MockMvc mockMvc;
@@ -87,6 +103,9 @@ class SecurityConfigurationTest {
     private org.springframework.security.web.authentication.session.SessionAuthenticationStrategy sessionAuthenticationStrategy;
 
     @Autowired
+    private SessionRegistry sessionRegistry;
+
+    @Autowired
     private Environment environment;
 
     @Test
@@ -96,6 +115,7 @@ class SecurityConfigurationTest {
         assertEquals(1, filters.stream().filter(JsonUsernamePasswordAuthenticationFilter.class::isInstance).count());
         assertTrue(filters.stream().anyMatch(CsrfFilter.class::isInstance));
         assertTrue(filters.stream().anyMatch(LogoutFilter.class::isInstance));
+        assertTrue(filters.stream().anyMatch(ConcurrentSessionFilter.class::isInstance));
         assertTrue(filters.stream().anyMatch(AuthorizationFilter.class::isInstance));
         assertFalse(filters.stream().anyMatch(UsernamePasswordAuthenticationFilter.class::isInstance));
         assertFalse(filters.stream().anyMatch(BasicAuthenticationFilter.class::isInstance));
@@ -108,6 +128,7 @@ class SecurityConfigurationTest {
     void securityUsesSessionBackedContextCsrfAndRequiredOnlySessionPolicy() throws Exception {
         assertInstanceOf(HttpSessionSecurityContextRepository.class, securityContextRepository);
         assertInstanceOf(CompositeSessionAuthenticationStrategy.class, sessionAuthenticationStrategy);
+        assertInstanceOf(SessionRegistryImpl.class, sessionRegistry);
         assertInstanceOf(org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository.class,
                 csrfTokenRepository);
         assertEquals("X-CSRF-TOKEN", csrfTokenRepository.generateToken(new MockHttpServletRequest()).getHeaderName());
@@ -137,6 +158,11 @@ class SecurityConfigurationTest {
         assertCsrfFailure(post("/api/auth/register").contentType(APPLICATION_JSON).content("{}"));
         assertCsrfFailure(post("/api/auth/login").contentType(APPLICATION_JSON).content("{}"));
         assertCsrfFailure(post("/api/auth/logout"));
+        assertLifecycleCsrfFailure("/api/auth/verify-email", "{\"token\":\"token\"}");
+        assertLifecycleCsrfFailure("/api/auth/resend-verification", "{\"email\":\"user@example.com\"}");
+        assertLifecycleCsrfFailure("/api/auth/forgot-password", "{\"email\":\"user@example.com\"}");
+        assertLifecycleCsrfFailure("/api/auth/reset-password",
+                "{\"token\":\"token\",\"newPassword\":\"a long enough password\"}");
         mockMvc.perform(post("/api/auth/login")
                         .contentType(APPLICATION_JSON)
                         .header("X-CSRF-TOKEN", "invalid-token")
@@ -145,6 +171,22 @@ class SecurityConfigurationTest {
                 .andExpect(content().json("""
                         {"code":"CSRF_INVALID","message":"The request could not be validated."}
                         """));
+    }
+
+    @Test
+    void newLifecycleRoutesArePublicForAuthenticationButStillRequireValidCsrf() throws Exception {
+        assertPublicLifecycleRoute("/api/auth/verify-email");
+        assertPublicLifecycleRoute("/api/auth/resend-verification");
+        assertPublicLifecycleRoute("/api/auth/forgot-password");
+        assertPublicLifecycleRoute("/api/auth/reset-password");
+    }
+
+    @Test
+    void accountMutationRoutesRequireAuthenticationAndCsrf() throws Exception {
+        assertAccountMutationSecurity("PATCH", "/api/account/profile", "{}");
+        assertAccountMutationSecurity("POST", "/api/account/change-password", "{}");
+        assertAccountMutationSecurity("POST", "/api/account/change-email", "{}");
+        assertAccountMutationSecurity("POST", "/api/account/confirm-email-change", "{}");
     }
 
     @Test
@@ -170,14 +212,17 @@ class SecurityConfigurationTest {
     @Test
     void authenticatedSecurityContextLoadsFromAndPersistsInHttpSession() throws Exception {
         MockHttpSession session = authenticatedSession();
+        UUID userId = UUID.fromString("a3d9151b-50d3-42c4-9c08-9637795af0c1");
+        when(currentAccountService.get(userId)).thenReturn(new CurrentAccount(
+                userId, "Fresh Test User", "fresh@example.com", true, UserStatus.ACTIVE));
 
         mockMvc.perform(get("/api/auth/me").session(session))
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
                 .andExpect(content().json("""
                         {"id":"a3d9151b-50d3-42c4-9c08-9637795af0c1",
-                         "displayName":"Test User",
-                         "email":"test@example.com",
+                        "displayName":"Fresh Test User",
+                         "email":"fresh@example.com",
                          "emailVerified":true,
                          "status":"ACTIVE"}
                         """))
@@ -230,6 +275,11 @@ class SecurityConfigurationTest {
 
         assertNotEquals(previousSessionId, session.getId());
         assertNull(csrfTokenRepository.loadToken(request));
+        SessionInformation registeredSession = sessionRegistry.getSessionInformation(session.getId());
+        assertNotNull(registeredSession);
+        assertEquals(authentication.getPrincipal(), registeredSession.getPrincipal());
+        assertNull(sessionRegistry.getSessionInformation(previousSessionId));
+        sessionRegistry.removeSessionInformation(session.getId());
     }
 
     @Test
@@ -282,7 +332,65 @@ class SecurityConfigurationTest {
                 .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
                 .andExpect(content().json("""
                         {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                """));
+    }
+
+    private void assertLifecycleCsrfFailure(String path, String body) throws Exception {
+        assertCsrfFailure(post(path).contentType(APPLICATION_JSON).content(body));
+        mockMvc.perform(post(path)
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
                         """));
+    }
+
+    private void assertPublicLifecycleRoute(String path) throws Exception {
+        mockMvc.perform(post(path)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader())
+                        .contentType(APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"VALIDATION_FAILED","message":"The request contains invalid data."}
+                        """));
+    }
+
+    private void assertAccountMutationSecurity(String method, String path, String invalidBody) throws Exception {
+        MockHttpServletRequestBuilder anonymousWithCsrf = accountRequest(method, path, invalidBody)
+                .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                        .csrf().asHeader());
+        mockMvc.perform(anonymousWithCsrf)
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().json("""
+                        {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
+                        """));
+
+        mockMvc.perform(accountRequest(method, path, invalidBody).session(authenticatedSession()))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+
+        mockMvc.perform(accountRequest(method, path, invalidBody)
+                        .session(authenticatedSession())
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"VALIDATION_FAILED","message":"The request contains invalid data."}
+                        """));
+    }
+
+    private static MockHttpServletRequestBuilder accountRequest(String method, String path, String body) {
+        return request(org.springframework.http.HttpMethod.valueOf(method), path)
+                .contentType(APPLICATION_JSON)
+                .content(body);
     }
 
     private MockHttpSession authenticatedSession() {

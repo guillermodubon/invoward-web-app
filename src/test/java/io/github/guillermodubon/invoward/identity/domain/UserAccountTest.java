@@ -8,6 +8,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UserAccountTest {
 
@@ -67,5 +68,51 @@ class UserAccountTest {
         assertFalse(account.toString().contains("Guillermo Hernández"));
         assertEquals("user@example.com", account.email());
         assertEquals("Guillermo Hernández", account.displayName());
+    }
+
+    @Test
+    void activatesOnlyPendingUnverifiedRegistrationAndKeepsPersistenceVersionSnapshot() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant activatedAt = createdAt.plusSeconds(30);
+        UserAccount pending = account(UserStatus.PENDING_VERIFICATION, false, createdAt);
+
+        UserAccount activated = pending.activateVerifiedRegistration(activatedAt);
+
+        assertEquals(UserStatus.ACTIVE, activated.status());
+        assertTrue(activated.emailVerified());
+        assertEquals(0, activated.version());
+        assertEquals(createdAt, activated.createdAt());
+        assertEquals(activatedAt, activated.updatedAt());
+        assertEquals(activated, activated.activateVerifiedRegistration(activatedAt));
+        assertThrows(IllegalStateException.class,
+                () -> account(UserStatus.DISABLED, false, createdAt).activateVerifiedRegistration(activatedAt));
+    }
+
+    @Test
+    void returnsAccountCopiesForDisplayNamePasswordAndEmailMutations() {
+        Instant createdAt = Instant.parse("2026-01-01T00:00:00Z");
+        Instant changedAt = createdAt.plusSeconds(60);
+        UserAccount active = account(UserStatus.ACTIVE, true, createdAt);
+
+        UserAccount renamed = active.updateDisplayName("  New  Display Name  ", changedAt);
+        UserAccount passwordChanged = renamed.updatePasswordHash("$argon2id$new-hash", changedAt);
+        UserAccount emailChanged = passwordChanged.updateEmail(" NEW@example.com ", changedAt);
+
+        assertEquals("New  Display Name", renamed.displayName());
+        assertEquals(active.email(), renamed.email());
+        assertEquals("$argon2id$new-hash", passwordChanged.passwordHash());
+        assertEquals("new@example.com", emailChanged.email());
+        assertTrue(emailChanged.emailVerified());
+        assertEquals(active.version(), emailChanged.version());
+        assertEquals(changedAt, emailChanged.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> account(UserStatus.DISABLED, true, createdAt)
+                        .updateDisplayName("Name", changedAt));
+    }
+
+    private static UserAccount account(UserStatus status, boolean emailVerified, Instant timestamp) {
+        return new UserAccount(
+                UUID.randomUUID(), "Current Name", "current@example.com", "$argon2id$current",
+                emailVerified, status, 0, timestamp, timestamp);
     }
 }

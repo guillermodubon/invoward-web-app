@@ -20,6 +20,7 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.security.web.authentication.logout.LogoutSuccessHandler;
 import org.springframework.security.web.authentication.session.ChangeSessionIdAuthenticationStrategy;
 import org.springframework.security.web.authentication.session.CompositeSessionAuthenticationStrategy;
+import org.springframework.security.web.authentication.session.RegisterSessionAuthenticationStrategy;
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
@@ -28,6 +29,11 @@ import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
+import org.springframework.security.core.session.SessionRegistry;
+import org.springframework.security.core.session.SessionRegistryImpl;
+import org.springframework.security.web.session.ConcurrentSessionFilter;
+import org.springframework.security.web.session.HttpSessionEventPublisher;
+import org.springframework.security.web.session.SessionInformationExpiredStrategy;
 import org.springframework.security.web.util.matcher.RequestMatcher;
 import tools.jackson.databind.ObjectMapper;
 
@@ -50,10 +56,23 @@ public class SecurityConfiguration {
     }
 
     @Bean
-    public SessionAuthenticationStrategy sessionAuthenticationStrategy(CsrfTokenRepository csrfTokenRepository) {
+    public SessionRegistry sessionRegistry() {
+        return new SessionRegistryImpl();
+    }
+
+    @Bean
+    public HttpSessionEventPublisher httpSessionEventPublisher() {
+        return new HttpSessionEventPublisher();
+    }
+
+    @Bean
+    public SessionAuthenticationStrategy sessionAuthenticationStrategy(
+            CsrfTokenRepository csrfTokenRepository,
+            SessionRegistry sessionRegistry) {
         return new CompositeSessionAuthenticationStrategy(List.of(
                 new ChangeSessionIdAuthenticationStrategy(),
-                new CsrfAuthenticationStrategy(csrfTokenRepository)));
+                new CsrfAuthenticationStrategy(csrfTokenRepository),
+                new RegisterSessionAuthenticationStrategy(sessionRegistry)));
     }
 
     @Bean
@@ -64,6 +83,8 @@ public class SecurityConfiguration {
             ObjectMapper objectMapper,
             SecurityContextRepository securityContextRepository,
             CsrfTokenRepository csrfTokenRepository,
+            SessionRegistry sessionRegistry,
+            SessionInformationExpiredStrategy sessionInformationExpiredStrategy,
             SessionAuthenticationStrategy sessionAuthenticationStrategy,
             JsonAuthenticationSuccessHandler successHandler,
             JsonAuthenticationFailureHandler failureHandler,
@@ -94,7 +115,13 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/info", "/api/auth/csrf")
                         .permitAll()
-                        .requestMatchers(HttpMethod.POST, "/api/auth/register", "/api/auth/login")
+                        .requestMatchers(HttpMethod.POST,
+                                "/api/auth/register",
+                                "/api/auth/login",
+                                "/api/auth/verify-email",
+                                "/api/auth/resend-verification",
+                                "/api/auth/forgot-password",
+                                "/api/auth/reset-password")
                         .permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/auth/logout")
                         .authenticated()
@@ -117,6 +144,9 @@ public class SecurityConfiguration {
                         .logoutSuccessHandler(logoutSuccessHandler()));
 
         http.addFilterAt(loginFilter, UsernamePasswordAuthenticationFilter.class);
+        http.addFilterAt(
+                new ConcurrentSessionFilter(sessionRegistry, sessionInformationExpiredStrategy),
+                ConcurrentSessionFilter.class);
         return http.build();
     }
 

@@ -39,6 +39,8 @@ class SpringSecurityPasswordHasherTest {
 
             assertTrue(encodedPassword.startsWith("$argon2id$v=19$m=19456,t=2,p=1$"));
             assertFalse(encodedPassword.contains(RAW_PASSWORD));
+            assertTrue(passwordHasher.matches(RAW_PASSWORD, encodedPassword));
+            assertFalse(passwordHasher.matches("a different passphrase", encodedPassword));
             assertTrue(passwordEncoder.matches(RAW_PASSWORD, encodedPassword));
             assertFalse(passwordEncoder.matches("a different passphrase", encodedPassword));
 

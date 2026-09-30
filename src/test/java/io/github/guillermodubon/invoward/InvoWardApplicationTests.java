@@ -5,6 +5,7 @@ import io.github.guillermodubon.invoward.notification.infrastructure.email.Email
 import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProperties;
 import io.github.guillermodubon.invoward.notification.infrastructure.email.disabled.DisabledEmailSender;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
+import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +32,9 @@ class InvoWardApplicationTests {
 
     @MockitoBean
     private SpringDataEmailVerificationTokenJpaRepository emailVerificationTokenJpaRepository;
+
+    @MockitoBean
+    private SpringDataPasswordResetTokenJpaRepository passwordResetTokenJpaRepository;
 
     @Autowired
     private ApplicationContext applicationContext;

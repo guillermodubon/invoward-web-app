@@ -1,11 +1,13 @@
 package io.github.guillermodubon.invoward.identity.application.service;
 
 import io.github.guillermodubon.invoward.identity.application.event.RegistrationVerificationRequested;
+import io.github.guillermodubon.invoward.identity.application.model.EmailVerificationToken;
 import io.github.guillermodubon.invoward.identity.application.model.GeneratedVerificationToken;
 import io.github.guillermodubon.invoward.identity.application.model.NewUserAccount;
 import io.github.guillermodubon.invoward.identity.application.port.EmailVerificationTokenRepository;
 import io.github.guillermodubon.invoward.identity.application.port.UserAccountRepository;
 import io.github.guillermodubon.invoward.identity.application.port.VerificationTokenGenerator;
+import io.github.guillermodubon.invoward.identity.domain.EmailVerificationPurpose;
 import io.github.guillermodubon.invoward.identity.domain.UserAccount;
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -92,8 +94,14 @@ class RegisterUserTransactionTest {
                 verificationTokenRepository, eventPublisher);
         order.verify(userAccountRepository).create(accountCaptor.capture());
         order.verify(verificationTokenGenerator).generate();
-        order.verify(verificationTokenRepository).saveRegistrationToken(
-                userId, EMAIL, TOKEN_HASH, NOW, NOW.plus(Duration.ofHours(24)));
+        order.verify(verificationTokenRepository).save(new EmailVerificationToken(
+                userId,
+                TOKEN_HASH,
+                EmailVerificationPurpose.REGISTRATION,
+                EMAIL,
+                NOW.plus(Duration.ofHours(24)),
+                null,
+                NOW));
         order.verify(eventPublisher).publishEvent(eventCaptor.capture());
 
         NewUserAccount createdAccount = accountCaptor.getValue();
@@ -128,7 +136,7 @@ class RegisterUserTransactionTest {
                 .thenReturn(new GeneratedVerificationToken(RAW_TOKEN, TOKEN_HASH));
         doThrow(new DataIntegrityViolationException("token persistence failure"))
                 .when(verificationTokenRepository)
-                .saveRegistrationToken(userId, EMAIL, TOKEN_HASH, NOW, NOW.plus(Duration.ofHours(24)));
+                .save(any(EmailVerificationToken.class));
 
         assertThrows(DataIntegrityViolationException.class,
                 () -> transaction.createPendingRegistration("New User", EMAIL, "$argon2id$test-hash"));

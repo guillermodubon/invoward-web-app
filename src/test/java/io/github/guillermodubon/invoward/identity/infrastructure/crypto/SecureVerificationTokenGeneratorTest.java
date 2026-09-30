@@ -20,20 +20,22 @@ class SecureVerificationTokenGeneratorTest {
         }
         RecordingSecureRandom secureRandom = new RecordingSecureRandom(randomBytes);
 
-        GeneratedVerificationToken generated = new SecureVerificationTokenGenerator(secureRandom).generate();
+        SecureVerificationTokenGenerator generator = new SecureVerificationTokenGenerator(secureRandom);
+        GeneratedVerificationToken generated = generator.generate();
 
         assertEquals(32, secureRandom.requestedByteCount);
         assertEquals(Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes), generated.rawToken());
         assertTrue(generated.rawToken().matches("[A-Za-z0-9_-]{43}"));
         assertTrue(!generated.rawToken().contains("="));
-        assertEquals(SecureVerificationTokenGenerator.hashToken(generated.rawToken()), generated.tokenHash());
+        assertEquals(generator.hash(generated.rawToken()), generated.tokenHash());
         assertNotEquals(generated.rawToken(), generated.tokenHash());
     }
 
     @Test
     void hashesFixedRawTokenDeterministicallyAsLowercaseSha256Hex() {
-        String firstHash = SecureVerificationTokenGenerator.hashToken("abc");
-        String secondHash = SecureVerificationTokenGenerator.hashToken("abc");
+        SecureVerificationTokenGenerator generator = new SecureVerificationTokenGenerator();
+        String firstHash = generator.hash("abc");
+        String secondHash = generator.hash("abc");
 
         assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", firstHash);
         assertEquals(firstHash, secondHash);

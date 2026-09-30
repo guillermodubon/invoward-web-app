@@ -18,4 +18,9 @@ public final class SpringSecurityPasswordHasher implements PasswordHasher {
     public String hash(String rawPassword) {
         return passwordEncoder.encode(rawPassword);
     }
+
+    @Override
+    public boolean matches(String rawPassword, String encodedPassword) {
+        return passwordEncoder.matches(rawPassword, encodedPassword);
+    }
 }

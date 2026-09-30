@@ -1,15 +1,25 @@
 package io.github.guillermodubon.invoward.identity.application.port;
 
+import io.github.guillermodubon.invoward.identity.application.model.EmailVerificationToken;
+import io.github.guillermodubon.invoward.identity.domain.EmailVerificationPurpose;
+
 import java.time.Instant;
+import java.util.Optional;
 import java.util.UUID;
 
-/** Persistence operation for the initial registration-verification token only. */
+/** Persistence operations for registration and email-change verification tokens. */
 public interface EmailVerificationTokenRepository {
 
-    void saveRegistrationToken(
+    void save(EmailVerificationToken token);
+
+    Optional<EmailVerificationToken> findByTokenHashForUpdate(String tokenHash);
+
+    Optional<Instant> findLatestCreatedAtByUserAndPurpose(UUID userId, EmailVerificationPurpose purpose);
+
+    boolean markUsed(String tokenHash, Instant usedAt);
+
+    int invalidateUnusedByUserAndPurpose(
             UUID userId,
-            String normalizedTargetEmail,
-            String tokenHash,
-            Instant createdAt,
-            Instant expiresAt);
+            EmailVerificationPurpose purpose,
+            Instant invalidatedAt);
 }
