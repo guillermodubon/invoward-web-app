@@ -5,6 +5,7 @@ import io.github.guillermodubon.invoward.identity.application.port.RegistrationV
 import io.github.guillermodubon.invoward.identity.application.port.UserAccountRepository;
 import io.github.guillermodubon.invoward.identity.application.port.VerificationTokenGenerator;
 import io.github.guillermodubon.invoward.identity.application.service.RegisterUserTransaction;
+import io.github.guillermodubon.invoward.identity.application.service.ResendRegistrationVerificationService;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -35,5 +36,23 @@ public class IdentityRegistrationConfiguration {
                 eventPublisher,
                 clock,
                 identityProperties.registrationVerificationTokenTtl());
+    }
+
+    @Bean
+    public ResendRegistrationVerificationService resendRegistrationVerificationService(
+            UserAccountRepository userAccountRepository,
+            EmailVerificationTokenRepository verificationTokenRepository,
+            VerificationTokenGenerator verificationTokenGenerator,
+            ApplicationEventPublisher eventPublisher,
+            Clock clock,
+            IdentityProperties identityProperties) {
+        return new ResendRegistrationVerificationService(
+                userAccountRepository,
+                verificationTokenRepository,
+                verificationTokenGenerator,
+                eventPublisher,
+                clock,
+                identityProperties.registrationVerificationTokenTtl(),
+                identityProperties.verificationResendCooldown());
     }
 }

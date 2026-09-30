@@ -1,11 +1,13 @@
 package io.github.guillermodubon.invoward.identity.application.service;
 
 import io.github.guillermodubon.invoward.identity.application.event.RegistrationVerificationRequested;
+import io.github.guillermodubon.invoward.identity.application.model.EmailVerificationToken;
 import io.github.guillermodubon.invoward.identity.application.model.GeneratedVerificationToken;
 import io.github.guillermodubon.invoward.identity.application.model.NewUserAccount;
 import io.github.guillermodubon.invoward.identity.application.port.EmailVerificationTokenRepository;
 import io.github.guillermodubon.invoward.identity.application.port.UserAccountRepository;
 import io.github.guillermodubon.invoward.identity.application.port.VerificationTokenGenerator;
+import io.github.guillermodubon.invoward.identity.domain.EmailVerificationPurpose;
 import io.github.guillermodubon.invoward.identity.domain.UserAccount;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.transaction.annotation.Transactional;
@@ -48,8 +50,14 @@ public class RegisterUserTransaction {
         GeneratedVerificationToken token = verificationTokenGenerator.generate();
         Instant expiresAt = now.plus(tokenTtl);
 
-        verificationTokenRepository.saveRegistrationToken(
-                user.id(), normalizedEmail, token.tokenHash(), now, expiresAt);
+        verificationTokenRepository.save(new EmailVerificationToken(
+                user.id(),
+                token.tokenHash(),
+                EmailVerificationPurpose.REGISTRATION,
+                normalizedEmail,
+                expiresAt,
+                null,
+                now));
         eventPublisher.publishEvent(new RegistrationVerificationRequested(
                 normalizedEmail, token.rawToken(), expiresAt));
     }
