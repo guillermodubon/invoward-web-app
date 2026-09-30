@@ -1,6 +1,7 @@
 package io.github.guillermodubon.invoward.identity.infrastructure.persistence.entity;
 
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
+import io.github.guillermodubon.invoward.identity.domain.UserAccount;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -67,6 +68,38 @@ public class UserJpaEntity {
         entity.createdAt = createdAt;
         entity.updatedAt = createdAt;
         return entity;
+    }
+
+    public void activateVerifiedRegistration(Instant activatedAt) {
+        Objects.requireNonNull(activatedAt, "activatedAt must not be null");
+        if (status == UserStatus.ACTIVE && emailVerified) {
+            return;
+        }
+        if (status != UserStatus.PENDING_VERIFICATION || emailVerified) {
+            throw new IllegalStateException("Only a pending unverified account can be activated");
+        }
+        status = UserStatus.ACTIVE;
+        emailVerified = true;
+        updatedAt = activatedAt;
+    }
+
+    public void updateDisplayName(String newDisplayName, Instant changedAt) {
+        displayName = UserAccount.normalizeDisplayName(newDisplayName);
+        updatedAt = Objects.requireNonNull(changedAt, "changedAt must not be null");
+    }
+
+    public void updatePasswordHash(String newPasswordHash, Instant changedAt) {
+        if (newPasswordHash == null || newPasswordHash.isBlank()) {
+            throw new IllegalArgumentException("passwordHash must not be blank");
+        }
+        passwordHash = newPasswordHash;
+        updatedAt = Objects.requireNonNull(changedAt, "changedAt must not be null");
+    }
+
+    public void updateEmail(String newEmail, Instant changedAt) {
+        email = UserAccount.normalizeEmail(newEmail);
+        emailVerified = true;
+        updatedAt = Objects.requireNonNull(changedAt, "changedAt must not be null");
     }
 
     public UUID getId() { return id; }

@@ -62,6 +62,54 @@ public record UserAccount(
         return normalizedDisplayName;
     }
 
+    /**
+     * Applies the registration-verification transition while preserving this persistence version.
+     * The repository returns the incremented version after the change is flushed.
+     */
+    public UserAccount activateVerifiedRegistration(Instant activatedAt) {
+        Objects.requireNonNull(activatedAt, "activatedAt must not be null");
+        if (status == UserStatus.ACTIVE && emailVerified) {
+            return this;
+        }
+        if (status != UserStatus.PENDING_VERIFICATION || emailVerified) {
+            throw new IllegalStateException("Only a pending unverified account can be activated");
+        }
+        return new UserAccount(
+                id, displayName, email, passwordHash, true, UserStatus.ACTIVE,
+                version, createdAt, activatedAt);
+    }
+
+    public UserAccount updateDisplayName(String newDisplayName, Instant changedAt) {
+        requireActiveVerifiedAccount();
+        return new UserAccount(
+                id, normalizeDisplayName(newDisplayName), email, passwordHash,
+                emailVerified, status, version, createdAt, requireTimestamp(changedAt));
+    }
+
+    public UserAccount updatePasswordHash(String newPasswordHash, Instant changedAt) {
+        requireActiveVerifiedAccount();
+        return new UserAccount(
+                id, displayName, email, newPasswordHash, emailVerified, status,
+                version, createdAt, requireTimestamp(changedAt));
+    }
+
+    public UserAccount updateEmail(String newEmail, Instant changedAt) {
+        requireActiveVerifiedAccount();
+        return new UserAccount(
+                id, displayName, normalizeEmail(newEmail), passwordHash, true, status,
+                version, createdAt, requireTimestamp(changedAt));
+    }
+
+    private void requireActiveVerifiedAccount() {
+        if (status != UserStatus.ACTIVE || !emailVerified) {
+            throw new IllegalStateException("Account must be active and verified for this change");
+        }
+    }
+
+    private static Instant requireTimestamp(Instant timestamp) {
+        return Objects.requireNonNull(timestamp, "changedAt must not be null");
+    }
+
     @Override
     public String toString() {
         return "UserAccount[id=" + id + ", passwordHash=[REDACTED]]";

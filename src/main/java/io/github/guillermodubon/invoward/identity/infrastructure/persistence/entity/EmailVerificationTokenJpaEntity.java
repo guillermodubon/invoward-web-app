@@ -1,5 +1,6 @@
 package io.github.guillermodubon.invoward.identity.infrastructure.persistence.entity;
 
+import io.github.guillermodubon.invoward.identity.application.model.EmailVerificationToken;
 import io.github.guillermodubon.invoward.identity.domain.EmailVerificationPurpose;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -45,21 +46,21 @@ public class EmailVerificationTokenJpaEntity {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
-    public static EmailVerificationTokenJpaEntity createRegistration(
-            UUID userId,
-            String normalizedTargetEmail,
-            String tokenHash,
-            Instant createdAt,
-            Instant expiresAt) {
+    public static EmailVerificationTokenJpaEntity fromModel(EmailVerificationToken token) {
         EmailVerificationTokenJpaEntity entity = new EmailVerificationTokenJpaEntity();
-        entity.userId = Objects.requireNonNull(userId, "userId must not be null");
-        entity.targetEmail = Objects.requireNonNull(normalizedTargetEmail,
-                "normalizedTargetEmail must not be null");
-        entity.tokenHash = Objects.requireNonNull(tokenHash, "tokenHash must not be null");
-        entity.purpose = EmailVerificationPurpose.REGISTRATION;
-        entity.createdAt = Objects.requireNonNull(createdAt, "createdAt must not be null");
-        entity.expiresAt = Objects.requireNonNull(expiresAt, "expiresAt must not be null");
+        EmailVerificationToken source = Objects.requireNonNull(token, "token must not be null");
+        entity.userId = source.userId();
+        entity.targetEmail = source.targetEmail();
+        entity.tokenHash = source.tokenHash();
+        entity.purpose = source.purpose();
+        entity.createdAt = source.createdAt();
+        entity.expiresAt = source.expiresAt();
+        entity.usedAt = source.usedAt();
         return entity;
+    }
+
+    public EmailVerificationToken toModel() {
+        return new EmailVerificationToken(userId, tokenHash, purpose, targetEmail, expiresAt, usedAt, createdAt);
     }
 
     public UUID getId() { return id; }

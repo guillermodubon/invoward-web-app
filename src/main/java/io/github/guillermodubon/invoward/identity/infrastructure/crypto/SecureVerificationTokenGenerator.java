@@ -13,7 +13,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Objects;
 
-/** Creates 256-bit registration tokens and persists only their SHA-256 hashes. */
+/** Creates 256-bit tokens and computes their SHA-256 hashes. */
 @Component
 public final class SecureVerificationTokenGenerator implements VerificationTokenGenerator {
 
@@ -34,13 +34,18 @@ public final class SecureVerificationTokenGenerator implements VerificationToken
         secureRandom.nextBytes(randomBytes);
         try {
             String rawToken = Base64.getUrlEncoder().withoutPadding().encodeToString(randomBytes);
-            return new GeneratedVerificationToken(rawToken, hashToken(rawToken));
+            return new GeneratedVerificationToken(rawToken, hash(rawToken));
         } finally {
             Arrays.fill(randomBytes, (byte) 0);
         }
     }
 
-    static String hashToken(String rawToken) {
+    @Override
+    public String hash(String rawToken) {
+        return hashToken(rawToken);
+    }
+
+    private static String hashToken(String rawToken) {
         Objects.requireNonNull(rawToken, "rawToken must not be null");
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
