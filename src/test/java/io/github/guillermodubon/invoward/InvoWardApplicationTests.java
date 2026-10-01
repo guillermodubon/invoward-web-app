@@ -4,9 +4,12 @@ import io.github.guillermodubon.invoward.notification.application.port.EmailSend
 import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProvider;
 import io.github.guillermodubon.invoward.notification.infrastructure.email.EmailProperties;
 import io.github.guillermodubon.invoward.notification.infrastructure.email.disabled.DisabledEmailSender;
+import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
+import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
+import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -35,6 +38,15 @@ class InvoWardApplicationTests {
 
     @MockitoBean
     private SpringDataPasswordResetTokenJpaRepository passwordResetTokenJpaRepository;
+
+    @MockitoBean
+    private SpringDataAnalysisJpaRepository analysisJpaRepository;
+
+    @MockitoBean
+    private SpringDataAnalysisJobJpaRepository analysisJobJpaRepository;
+
+    @MockitoBean
+    private SpringDataGuestSessionJpaRepository guestSessionJpaRepository;
 
     @Autowired
     private ApplicationContext applicationContext;

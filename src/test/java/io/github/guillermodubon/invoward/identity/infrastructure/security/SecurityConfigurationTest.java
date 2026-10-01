@@ -4,10 +4,20 @@ import io.github.guillermodubon.invoward.identity.domain.UserAccount;
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
 import io.github.guillermodubon.invoward.identity.application.model.CurrentAccount;
 import io.github.guillermodubon.invoward.identity.application.service.CurrentAccountService;
+import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
+import io.github.guillermodubon.invoward.analysis.api.GuestSessionCookieSupport;
+import io.github.guillermodubon.invoward.analysis.application.service.CreateAnalysisService;
+import io.github.guillermodubon.invoward.analysis.domain.Analysis;
+import io.github.guillermodubon.invoward.analysis.domain.GuestSessionOwner;
+import io.github.guillermodubon.invoward.analysis.domain.PriceTolerance;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
+import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
+import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
+import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
 import jakarta.servlet.Filter;
+import jakarta.servlet.http.HttpServletRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -34,6 +44,7 @@ import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.csrf.CsrfFilter;
 import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.CsrfTokenRepository;
+import org.springframework.http.ResponseCookie;
 import org.springframework.security.web.authentication.session.CompositeSessionAuthenticationStrategy;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -44,7 +55,9 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
+import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,6 +67,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.when;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -82,7 +98,25 @@ class SecurityConfigurationTest {
     private SpringDataPasswordResetTokenJpaRepository passwordResetTokenJpaRepository;
 
     @MockitoBean
+    private SpringDataAnalysisJpaRepository analysisJpaRepository;
+
+    @MockitoBean
+    private SpringDataAnalysisJobJpaRepository analysisJobJpaRepository;
+
+    @MockitoBean
+    private SpringDataGuestSessionJpaRepository guestSessionJpaRepository;
+
+    @MockitoBean
     private CurrentAccountService currentAccountService;
+
+    @MockitoBean
+    private AnalysisRequestOwnerResolver analysisRequestOwnerResolver;
+
+    @MockitoBean
+    private CreateAnalysisService createAnalysisService;
+
+    @MockitoBean
+    private GuestSessionCookieSupport guestSessionCookieSupport;
 
     @Autowired
     private MockMvc mockMvc;
@@ -150,6 +184,65 @@ class SecurityConfigurationTest {
                         """))
                 .andExpect(result -> assertNull(result.getRequest().getSession(false)));
         mockMvc.perform(get("/api/private/unlisted"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void analysisCoreRoutesAreNarrowlyPublicAndKeepCsrfAndNestedPathsProtected() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/api/analyses/{id}", analysisId))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+        mockMvc.perform(get("/api/analyses/{id}/status", analysisId))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+
+        assertCsrfFailure(post("/api/analyses")
+                .contentType(APPLICATION_JSON)
+                .content("{}"));
+        mockMvc.perform(post("/api/analyses")
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+
+        GuestSessionOwner owner = new GuestSessionOwner(UUID.randomUUID(), Instant.now().plus(Duration.ofHours(24)));
+        Analysis analysis = Analysis.create(UUID.randomUUID(), owner, PriceTolerance.exactMatch(), Instant.now());
+        when(analysisRequestOwnerResolver.resolveForCreate(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(owner);
+        when(createAnalysisService.create(eq(owner), eq(PriceTolerance.exactMatch()))).thenReturn(analysis);
+        when(guestSessionCookieSupport.createGuestSessionCookie(owner)).thenReturn(ResponseCookie
+                .from(GuestSessionCookieSupport.COOKIE_NAME, owner.guestSessionId().toString())
+                .httpOnly(true)
+                .sameSite("Lax")
+                .path(GuestSessionCookieSupport.COOKIE_PATH)
+                .build());
+
+        mockMvc.perform(post("/api/analyses")
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader())
+                        .contentType(APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isAccepted());
+
+        mockMvc.perform(get("/api/analyses/{id}/documents", analysisId))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/analyses/{id}/status/extra", analysisId))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/analyses/{id}/status", analysisId)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
                 .andExpect(status().isUnauthorized());
     }
 

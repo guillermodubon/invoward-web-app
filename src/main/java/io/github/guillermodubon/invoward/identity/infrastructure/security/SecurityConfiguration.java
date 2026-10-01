@@ -127,6 +127,10 @@ public class SecurityConfiguration {
                         .authenticated()
                         .requestMatchers(HttpMethod.GET, "/api/auth/me")
                         .authenticated()
+                        .requestMatchers(HttpMethod.POST, "/api/analyses")
+                        .permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/analyses/*", "/api/analyses/*/status")
+                        .permitAll()
                         .anyRequest()
                         .authenticated())
                 .exceptionHandling(exceptionHandling -> exceptionHandling
