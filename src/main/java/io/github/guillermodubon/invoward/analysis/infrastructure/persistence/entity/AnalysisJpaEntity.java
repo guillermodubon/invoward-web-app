@@ -7,14 +7,13 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -22,7 +21,6 @@ import java.util.UUID;
 public class AnalysisJpaEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id;
 
@@ -101,6 +99,12 @@ public class AnalysisJpaEntity {
 
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
+
+    public static AnalysisJpaEntity create(UUID id) {
+        AnalysisJpaEntity entity = new AnalysisJpaEntity();
+        entity.id = Objects.requireNonNull(id, "id must not be null");
+        return entity;
+    }
 
     public UUID getId() { return id; }
     public UUID getUserId() { return userId; }
