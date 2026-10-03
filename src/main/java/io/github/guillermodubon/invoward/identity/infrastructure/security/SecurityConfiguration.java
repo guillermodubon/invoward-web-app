@@ -131,6 +131,12 @@ public class SecurityConfiguration {
                         .permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/analyses/*", "/api/analyses/*/status")
                         .permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/analyses/*/documents")
+                        .permitAll()
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/analyses/*/documents",
+                                "/api/analyses/*/documents/*")
+                        .permitAll()
                         .anyRequest()
                         .authenticated())
                 .exceptionHandling(exceptionHandling -> exceptionHandling
