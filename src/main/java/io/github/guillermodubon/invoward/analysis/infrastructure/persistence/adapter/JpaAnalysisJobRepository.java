@@ -4,6 +4,7 @@ import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRe
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.mapper.AnalysisJobPersistenceMapper;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
+import jakarta.persistence.EntityNotFoundException;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -37,5 +38,21 @@ public class JpaAnalysisJobRepository implements AnalysisJobRepository {
     public Optional<AnalysisJob> findByAnalysisId(UUID analysisId) {
         Objects.requireNonNull(analysisId, "analysisId must not be null");
         return repository.findByAnalysisId(analysisId).map(mapper::toDomain);
+    }
+
+    @Override
+    public Optional<AnalysisJob> findJobByAnalysisIdForUpdate(UUID analysisId) {
+        Objects.requireNonNull(analysisId, "analysisId must not be null");
+        return repository.findByAnalysisIdForUpdate(analysisId).map(mapper::toDomain);
+    }
+
+    @Override
+    public AnalysisJob update(AnalysisJob analysisJob) {
+        Objects.requireNonNull(analysisJob, "analysisJob must not be null");
+        var entity = repository.findById(analysisJob.id())
+                .orElseThrow(() -> new EntityNotFoundException("Analysis job does not exist"));
+        mapper.updateEntity(analysisJob, entity);
+        repository.flush();
+        return mapper.toDomain(entity);
     }
 }

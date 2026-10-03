@@ -13,6 +13,7 @@ import io.github.guillermodubon.invoward.analysis.domain.PriceTolerance;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJpaRepository;
+import io.github.guillermodubon.invoward.document.infrastructure.persistence.repository.SpringDataDocumentJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
@@ -107,6 +108,9 @@ class SecurityConfigurationTest {
     private SpringDataGuestSessionJpaRepository guestSessionJpaRepository;
 
     @MockitoBean
+    private SpringDataDocumentJpaRepository documentJpaRepository;
+
+    @MockitoBean
     private CurrentAccountService currentAccountService;
 
     @MockitoBean
@@ -188,7 +192,7 @@ class SecurityConfigurationTest {
     }
 
     @Test
-    void analysisCoreRoutesAreNarrowlyPublicAndKeepCsrfAndNestedPathsProtected() throws Exception {
+    void analysisAndDocumentGuestRoutesAreNarrowlyPublicAndKeepCsrfEnabled() throws Exception {
         UUID analysisId = UUID.randomUUID();
         when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
                 .thenReturn(Optional.empty());
@@ -237,6 +241,14 @@ class SecurityConfigurationTest {
                 .andExpect(status().isAccepted());
 
         mockMvc.perform(get("/api/analyses/{id}/documents", analysisId))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/analyses/{id}/documents/{documentId}", analysisId, UUID.randomUUID()))
+                .andExpect(status().isNotFound());
+        assertCsrfFailure(post("/api/analyses/{id}/documents", analysisId)
+                .contentType("multipart/form-data; boundary=InvoWardBoundary")
+                .content("--InvoWardBoundary--\r\n"));
+        mockMvc.perform(get("/api/analyses/{id}/documents/{documentId}/extra",
+                        analysisId, UUID.randomUUID()))
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(get("/api/analyses/{id}/status/extra", analysisId))
                 .andExpect(status().isUnauthorized());

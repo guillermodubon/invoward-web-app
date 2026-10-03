@@ -87,6 +87,41 @@ public record Analysis(
                 now);
     }
 
+    /** Marks an Analysis as receiving documents while uploads are still being assembled. */
+    public Analysis transitionToUploading(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisStatus.CREATED && status != AnalysisStatus.UPLOADING) {
+            throw new IllegalStateException("Analysis cannot accept uploads in its current state");
+        }
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+        return new Analysis(
+                id,
+                owner,
+                AnalysisStatus.UPLOADING,
+                reviewStatus,
+                reconciliationStatus,
+                supplierName,
+                supplierKey,
+                referenceType,
+                referenceNumber,
+                invoiceNumber,
+                currency,
+                referenceTotal,
+                invoicedTotal,
+                difference,
+                priceTolerance,
+                retryable,
+                failureCode,
+                failureUserMessage,
+                version,
+                completedAt,
+                expiresAt,
+                createdAt,
+                now);
+    }
+
     private static void validateOwnerExpiry(AnalysisOwner owner, Instant expiresAt, Instant createdAt) {
         if (owner instanceof GuestSessionOwner guestOwner) {
             Objects.requireNonNull(expiresAt, "guest Analysis expiresAt must not be null");

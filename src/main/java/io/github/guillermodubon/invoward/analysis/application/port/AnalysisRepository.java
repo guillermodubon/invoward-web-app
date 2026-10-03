@@ -13,4 +13,8 @@ public interface AnalysisRepository {
     Analysis create(Analysis analysis);
 
     Optional<Analysis> findOwnedById(UUID analysisId, AnalysisOwner owner, Instant now);
+
+    Optional<Analysis> findOwnedByIdForUpdate(UUID analysisId, AnalysisOwner owner, Instant now);
+
+    Analysis update(Analysis analysis);
 }

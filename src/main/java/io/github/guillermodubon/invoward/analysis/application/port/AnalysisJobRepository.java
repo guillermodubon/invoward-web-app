@@ -11,4 +11,8 @@ public interface AnalysisJobRepository {
     AnalysisJob create(AnalysisJob analysisJob);
 
     Optional<AnalysisJob> findByAnalysisId(UUID analysisId);
+
+    Optional<AnalysisJob> findJobByAnalysisIdForUpdate(UUID analysisId);
+
+    AnalysisJob update(AnalysisJob analysisJob);
 }

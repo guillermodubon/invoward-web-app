@@ -65,7 +65,10 @@ class AnalysisPersistenceIT {
 
         assertEquals(analysis, persisted);
         assertEquals(analysis, analysisRepository.findOwnedById(analysis.id(), owner, NOW).orElseThrow());
+        assertEquals(analysis, analysisRepository.findOwnedByIdForUpdate(analysis.id(), owner, NOW).orElseThrow());
         assertFalse(analysisRepository.findOwnedById(
+                analysis.id(), new RegisteredUserOwner(UUID.randomUUID()), NOW).isPresent());
+        assertFalse(analysisRepository.findOwnedByIdForUpdate(
                 analysis.id(), new RegisteredUserOwner(UUID.randomUUID()), NOW).isPresent());
         assertFalse(analysisJobRepository.findByAnalysisId(analysis.id()).isPresent());
         assertEquals(userId, jdbcTemplate.queryForObject(
@@ -86,9 +89,14 @@ class AnalysisPersistenceIT {
 
         assertEquals(analysis, persisted);
         assertEquals(analysis, analysisRepository.findOwnedById(analysis.id(), owner, NOW).orElseThrow());
+        assertEquals(analysis, analysisRepository.findOwnedByIdForUpdate(analysis.id(), owner, NOW).orElseThrow());
         assertFalse(analysisRepository.findOwnedById(
                 analysis.id(), owner, expiry).isPresent());
+        assertFalse(analysisRepository.findOwnedByIdForUpdate(
+                analysis.id(), owner, expiry).isPresent());
         assertFalse(analysisRepository.findOwnedById(
+                analysis.id(), new GuestSessionOwner(UUID.randomUUID(), expiry), NOW).isPresent());
+        assertFalse(analysisRepository.findOwnedByIdForUpdate(
                 analysis.id(), new GuestSessionOwner(UUID.randomUUID(), expiry), NOW).isPresent());
         assertNull(jdbcTemplate.queryForObject(
                 "SELECT user_id FROM invoward.analyses WHERE id = ?", UUID.class, analysis.id()));
@@ -109,12 +117,43 @@ class AnalysisPersistenceIT {
         assertEquals(job, persisted);
         AnalysisJob loaded = analysisJobRepository.findByAnalysisId(analysis.id()).orElseThrow();
         assertEquals(job, loaded);
+        assertEquals(job, analysisJobRepository.findJobByAnalysisIdForUpdate(analysis.id()).orElseThrow());
         assertEquals(AnalysisJobStatus.WAITING_FOR_USER, loaded.status());
         assertEquals(AnalysisStatus.CREATED, loaded.currentStage());
         assertEquals(0, loaded.attemptCount());
         assertEquals(AnalysisReviewStatus.PENDING,
                 analysisRepository.findOwnedById(analysis.id(), analysis.owner(), NOW)
                         .orElseThrow().reviewStatus());
+    }
+
+    @Test
+    void ownerScopedLocksAndUpdatesAnalysisAndJobUploadState() throws Exception {
+        RegisteredUserOwner owner = new RegisteredUserOwner(insertUser());
+        Analysis created = analysisRepository.create(Analysis.create(
+                UUID.randomUUID(), owner, PriceTolerance.exactMatch(), NOW));
+        AnalysisJob initialJob = analysisJobRepository.create(
+                AnalysisJob.waitingForUser(UUID.randomUUID(), created.id(), NOW));
+        Instant uploadedAt = NOW.plusSeconds(10);
+
+        Analysis lockedAnalysis = analysisRepository.findOwnedByIdForUpdate(
+                created.id(), owner, uploadedAt).orElseThrow();
+        Analysis persistedAnalysis = analysisRepository.update(lockedAnalysis.transitionToUploading(uploadedAt));
+        AnalysisJob lockedJob = analysisJobRepository.findJobByAnalysisIdForUpdate(created.id()).orElseThrow();
+        AnalysisJob persistedJob = analysisJobRepository.update(lockedJob.awaitMoreUploads(uploadedAt));
+
+        assertEquals(AnalysisStatus.UPLOADING, persistedAnalysis.status());
+        assertEquals(1, persistedAnalysis.version());
+        assertEquals(uploadedAt, persistedAnalysis.updatedAt());
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, persistedJob.status());
+        assertEquals(AnalysisStatus.UPLOADING, persistedJob.currentStage());
+        assertEquals(initialJob.attemptCount(), persistedJob.attemptCount());
+        assertFalse(persistedJob.retryable());
+        assertNull(persistedJob.startedAt());
+        assertNull(persistedJob.completedAt());
+        assertEquals(uploadedAt, persistedJob.updatedAt());
+        assertEquals(persistedAnalysis,
+                analysisRepository.findOwnedById(created.id(), owner, uploadedAt).orElseThrow());
+        assertEquals(persistedJob, analysisJobRepository.findByAnalysisId(created.id()).orElseThrow());
     }
 
     @Test

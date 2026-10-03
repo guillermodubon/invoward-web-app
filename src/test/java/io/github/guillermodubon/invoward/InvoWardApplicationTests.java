@@ -6,6 +6,8 @@ import io.github.guillermodubon.invoward.notification.infrastructure.email.Email
 import io.github.guillermodubon.invoward.notification.infrastructure.email.disabled.DisabledEmailSender;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJpaRepository;
+import io.github.guillermodubon.invoward.document.infrastructure.persistence.repository.SpringDataDocumentJpaRepository;
+import io.github.guillermodubon.invoward.document.application.service.UploadDocumentService;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataEmailVerificationTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
@@ -48,6 +50,9 @@ class InvoWardApplicationTests {
     @MockitoBean
     private SpringDataGuestSessionJpaRepository guestSessionJpaRepository;
 
+    @MockitoBean
+    private SpringDataDocumentJpaRepository documentJpaRepository;
+
     @Autowired
     private ApplicationContext applicationContext;
 
@@ -78,6 +83,11 @@ class InvoWardApplicationTests {
     void transactionalEmailIsDisabledByDefault() {
         assertEquals(EmailProvider.DISABLED, applicationContext.getBean(EmailProperties.class).provider());
         assertInstanceOf(DisabledEmailSender.class, applicationContext.getBean(EmailSender.class));
+    }
+
+    @Test
+    void uploadDocumentServiceIsWiredWithTheDisabledStorageDefault() {
+        assertNotNull(applicationContext.getBean(UploadDocumentService.class));
     }
 
 }

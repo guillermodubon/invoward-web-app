@@ -57,6 +57,40 @@ class AnalysisTest {
     }
 
     @Test
+    void transitionsCreatedAndUploadingAnalysisToUploading() {
+        Analysis created = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);
+        Instant firstUploadAt = NOW.plusSeconds(5);
+
+        Analysis uploading = created.transitionToUploading(firstUploadAt);
+        Analysis uploadingAgain = uploading.transitionToUploading(firstUploadAt.plusSeconds(5));
+
+        assertEquals(AnalysisStatus.UPLOADING, uploading.status());
+        assertEquals(firstUploadAt, uploading.updatedAt());
+        assertEquals(AnalysisStatus.UPLOADING, uploadingAgain.status());
+        assertEquals(firstUploadAt.plusSeconds(5), uploadingAgain.updatedAt());
+        assertEquals(created.id(), uploading.id());
+        assertEquals(created.owner(), uploading.owner());
+        assertEquals(created.priceTolerance(), uploading.priceTolerance());
+        assertEquals(created.version(), uploading.version());
+        assertEquals(created.createdAt(), uploading.createdAt());
+    }
+
+    @Test
+    void rejectsUploadTransitionsAfterAnalysisLeavesUploadStates() {
+        Analysis created = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);
+
+        for (AnalysisStatus status : new AnalysisStatus[]{
+                AnalysisStatus.CLASSIFYING, AnalysisStatus.EXTRACTING, AnalysisStatus.COMPLETED,
+                AnalysisStatus.FAILED}) {
+            Analysis laterState = withStatus(created, status);
+            assertThrows(IllegalStateException.class,
+                    () -> laterState.transitionToUploading(NOW.plusSeconds(1)));
+        }
+    }
+
+    @Test
     void rejectsInvalidRequiredValuesOwnershipExpiryAndTimestamps() {
         RegisteredUserOwner registered = new RegisteredUserOwner(UUID.randomUUID());
         GuestSessionOwner guest = GuestSessionOwner.create(UUID.randomUUID(), NOW.plusSeconds(10), NOW);
@@ -115,5 +149,16 @@ class AnalysisTest {
                 null, null, null, null, null, null,
                 referenceTotal, invoicedTotal, difference, EXACT,
                 false, null, null, version, completedAt, expiresAt, createdAt, updatedAt);
+    }
+
+    private static Analysis withStatus(Analysis analysis, AnalysisStatus status) {
+        return new Analysis(
+                analysis.id(), analysis.owner(), status, analysis.reviewStatus(),
+                analysis.reconciliationStatus(), analysis.supplierName(), analysis.supplierKey(),
+                analysis.referenceType(), analysis.referenceNumber(), analysis.invoiceNumber(),
+                analysis.currency(), analysis.referenceTotal(), analysis.invoicedTotal(),
+                analysis.difference(), analysis.priceTolerance(), analysis.retryable(),
+                analysis.failureCode(), analysis.failureUserMessage(), analysis.version(),
+                analysis.completedAt(), analysis.expiresAt(), analysis.createdAt(), analysis.updatedAt());
     }
 }
