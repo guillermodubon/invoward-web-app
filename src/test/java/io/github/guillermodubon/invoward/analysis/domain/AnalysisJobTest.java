@@ -36,6 +36,42 @@ class AnalysisJobTest {
     }
 
     @Test
+    void remainsWaitingForUserAtUploadingStageWithoutStartingAnAttempt() {
+        UUID jobId = UUID.randomUUID();
+        UUID analysisId = UUID.randomUUID();
+        AnalysisJob initial = AnalysisJob.waitingForUser(jobId, analysisId, NOW);
+        Instant uploadAt = NOW.plusSeconds(10);
+
+        AnalysisJob uploading = initial.awaitMoreUploads(uploadAt);
+
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, uploading.status());
+        assertEquals(AnalysisStatus.UPLOADING, uploading.currentStage());
+        assertEquals(0, uploading.attemptCount());
+        assertFalse(uploading.retryable());
+        assertNull(uploading.lastErrorCode());
+        assertNull(uploading.lastErrorMessage());
+        assertNull(uploading.startedAt());
+        assertNull(uploading.completedAt());
+        assertEquals(NOW, uploading.createdAt());
+        assertEquals(uploadAt, uploading.updatedAt());
+
+        AnalysisJob uploadingAgain = uploading.awaitMoreUploads(uploadAt.plusSeconds(10));
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, uploadingAgain.status());
+        assertEquals(AnalysisStatus.UPLOADING, uploadingAgain.currentStage());
+        assertEquals(0, uploadingAgain.attemptCount());
+        assertNull(uploadingAgain.startedAt());
+    }
+
+    @Test
+    void rejectsUploadWaitTransitionWhenJobIsNotWaitingForUser() {
+        AnalysisJob queued = new AnalysisJob(
+                UUID.randomUUID(), UUID.randomUUID(), AnalysisJobStatus.QUEUED,
+                AnalysisStatus.CREATED, 0, false, null, null, null, null, NOW, NOW);
+
+        assertThrows(IllegalStateException.class, () -> queued.awaitMoreUploads(NOW.plusSeconds(1)));
+    }
+
+    @Test
     void requiresIdentifiersAndValidStateAndTimestamps() {
         UUID jobId = UUID.randomUUID();
         UUID analysisId = UUID.randomUUID();

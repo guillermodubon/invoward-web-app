@@ -8,6 +8,8 @@ import io.github.guillermodubon.invoward.analysis.domain.RegisteredUserOwner;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.entity.AnalysisJpaEntity;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.mapper.AnalysisPersistenceMapper;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJpaRepository;
+import jakarta.persistence.EntityNotFoundException;
+import jakarta.persistence.OptimisticLockException;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -47,6 +49,28 @@ public class JpaAnalysisRepository implements AnalysisRepository {
         return entity.map(mapper::toDomain);
     }
 
+    @Override
+    public Optional<Analysis> findOwnedByIdForUpdate(UUID analysisId, AnalysisOwner owner, Instant now) {
+        Objects.requireNonNull(analysisId, "analysisId must not be null");
+        Objects.requireNonNull(owner, "owner must not be null");
+        Objects.requireNonNull(now, "now must not be null");
+        Optional<AnalysisJpaEntity> entity = findOwnedEntityForUpdate(analysisId, owner, now);
+        return entity.map(mapper::toDomain);
+    }
+
+    @Override
+    public Analysis update(Analysis analysis) {
+        Objects.requireNonNull(analysis, "analysis must not be null");
+        AnalysisJpaEntity entity = repository.findById(analysis.id())
+                .orElseThrow(() -> new EntityNotFoundException("Analysis does not exist"));
+        if (entity.getVersion() != analysis.version()) {
+            throw new OptimisticLockException("Analysis was modified concurrently");
+        }
+        mapper.updateEntity(analysis, entity);
+        repository.flush();
+        return mapper.toDomain(entity);
+    }
+
     private Optional<AnalysisJpaEntity> findOwnedEntity(
             UUID analysisId, AnalysisOwner owner, Instant now) {
         if (owner instanceof RegisteredUserOwner registeredOwner) {
@@ -54,6 +78,18 @@ public class JpaAnalysisRepository implements AnalysisRepository {
         }
         if (owner instanceof GuestSessionOwner guestOwner) {
             return repository.findByIdAndGuestSessionIdAndExpiresAtAfter(
+                    analysisId, guestOwner.guestSessionId(), now);
+        }
+        throw new IllegalArgumentException("Unsupported Analysis owner type");
+    }
+
+    private Optional<AnalysisJpaEntity> findOwnedEntityForUpdate(
+            UUID analysisId, AnalysisOwner owner, Instant now) {
+        if (owner instanceof RegisteredUserOwner registeredOwner) {
+            return repository.findOwnedByIdForUpdateAndUserId(analysisId, registeredOwner.userId());
+        }
+        if (owner instanceof GuestSessionOwner guestOwner) {
+            return repository.findOwnedByIdForUpdateAndGuestSessionId(
                     analysisId, guestOwner.guestSessionId(), now);
         }
         throw new IllegalArgumentException("Unsupported Analysis owner type");

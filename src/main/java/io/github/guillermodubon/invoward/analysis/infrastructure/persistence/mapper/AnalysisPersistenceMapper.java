@@ -18,6 +18,16 @@ public class AnalysisPersistenceMapper {
     public AnalysisJpaEntity toEntity(Analysis analysis) {
         Objects.requireNonNull(analysis, "analysis must not be null");
         AnalysisJpaEntity entity = AnalysisJpaEntity.create(analysis.id());
+        updateEntity(analysis, entity);
+        return entity;
+    }
+
+    public void updateEntity(Analysis analysis, AnalysisJpaEntity entity) {
+        Objects.requireNonNull(analysis, "analysis must not be null");
+        Objects.requireNonNull(entity, "entity must not be null");
+        if (!analysis.id().equals(entity.getId())) {
+            throw new IllegalArgumentException("Analysis id must match persistence entity id");
+        }
         mapOwner(analysis.owner(), entity);
         entity.setStatus(analysis.status());
         entity.setReviewStatus(analysis.reviewStatus());
@@ -40,7 +50,6 @@ public class AnalysisPersistenceMapper {
         entity.setExpiresAt(analysis.expiresAt());
         entity.setCreatedAt(analysis.createdAt());
         entity.setUpdatedAt(analysis.updatedAt());
-        return entity;
     }
 
     public Analysis toDomain(AnalysisJpaEntity entity) {

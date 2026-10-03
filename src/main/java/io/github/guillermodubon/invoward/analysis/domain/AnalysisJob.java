@@ -58,6 +58,31 @@ public record AnalysisJob(
                 now);
     }
 
+    /** Keeps the job idle until document upload is complete, without starting a worker attempt. */
+    public AnalysisJob awaitMoreUploads(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER
+                || (currentStage != AnalysisStatus.CREATED && currentStage != AnalysisStatus.UPLOADING)) {
+            throw new IllegalStateException("Analysis job cannot wait for uploads in its current state");
+        }
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+        return new AnalysisJob(
+                id,
+                analysisId,
+                AnalysisJobStatus.WAITING_FOR_USER,
+                AnalysisStatus.UPLOADING,
+                attemptCount,
+                false,
+                lastErrorCode,
+                lastErrorMessage,
+                startedAt,
+                completedAt,
+                createdAt,
+                now);
+    }
+
     @Override
     public String toString() {
         return "AnalysisJob[id=" + id + ", analysisId=" + analysisId + ", status=" + status

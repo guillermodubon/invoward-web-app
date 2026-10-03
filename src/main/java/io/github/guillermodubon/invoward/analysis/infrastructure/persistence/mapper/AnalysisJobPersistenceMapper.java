@@ -13,6 +13,16 @@ public class AnalysisJobPersistenceMapper {
     public AnalysisJobJpaEntity toEntity(AnalysisJob analysisJob) {
         Objects.requireNonNull(analysisJob, "analysisJob must not be null");
         AnalysisJobJpaEntity entity = AnalysisJobJpaEntity.create(analysisJob.id());
+        updateEntity(analysisJob, entity);
+        return entity;
+    }
+
+    public void updateEntity(AnalysisJob analysisJob, AnalysisJobJpaEntity entity) {
+        Objects.requireNonNull(analysisJob, "analysisJob must not be null");
+        Objects.requireNonNull(entity, "entity must not be null");
+        if (!analysisJob.id().equals(entity.getId())) {
+            throw new IllegalArgumentException("Analysis job id must match persistence entity id");
+        }
         entity.setAnalysisId(analysisJob.analysisId());
         entity.setStatus(analysisJob.status());
         entity.setCurrentStage(analysisJob.currentStage());
@@ -24,7 +34,6 @@ public class AnalysisJobPersistenceMapper {
         entity.setCompletedAt(analysisJob.completedAt());
         entity.setCreatedAt(analysisJob.createdAt());
         entity.setUpdatedAt(analysisJob.updatedAt());
-        return entity;
     }
 
     public AnalysisJob toDomain(AnalysisJobJpaEntity entity) {
