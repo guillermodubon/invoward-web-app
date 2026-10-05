@@ -86,6 +86,10 @@ public class ExtractedDocumentJpaEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    public static ExtractedDocumentJpaEntity create() {
+        return new ExtractedDocumentJpaEntity();
+    }
+
     public UUID getId() { return id; }
     public UUID getDocumentId() { return documentId; }
     public void setDocumentId(UUID documentId) { this.documentId = documentId; }
