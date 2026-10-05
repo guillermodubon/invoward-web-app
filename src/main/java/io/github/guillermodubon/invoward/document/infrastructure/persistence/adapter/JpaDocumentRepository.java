@@ -45,6 +45,17 @@ public class JpaDocumentRepository implements DocumentRepository {
     }
 
     @Override
+    public Optional<Document> updateTypes(Document document) {
+        Objects.requireNonNull(document, "document must not be null");
+        return repository.findByIdAndAnalysisId(document.id(), document.analysisId())
+                .map(entity -> {
+                    mapper.updateTypes(document, entity);
+                    repository.flush();
+                    return mapper.toDomain(entity);
+                });
+    }
+
+    @Override
     @Transactional(readOnly = true)
     public List<Document> findByAnalysisId(UUID analysisId) {
         Objects.requireNonNull(analysisId, "analysisId must not be null");

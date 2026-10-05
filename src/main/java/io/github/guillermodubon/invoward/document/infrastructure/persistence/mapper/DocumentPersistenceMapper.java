@@ -45,4 +45,15 @@ public class DocumentPersistenceMapper {
                 entity.getExpiresAt(),
                 entity.getCreatedAt());
     }
+
+    public void updateTypes(Document document, DocumentJpaEntity entity) {
+        Objects.requireNonNull(document, "document must not be null");
+        Objects.requireNonNull(entity, "entity must not be null");
+        if (!document.id().equals(entity.getId())
+                || !document.analysisId().equals(entity.getAnalysisId())) {
+            throw new IllegalArgumentException("Document identity does not match persistence entity");
+        }
+        entity.setDetectedType(document.detectedType());
+        entity.setConfirmedType(document.confirmedType());
+    }
 }

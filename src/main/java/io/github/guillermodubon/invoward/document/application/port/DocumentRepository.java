@@ -12,6 +12,9 @@ public interface DocumentRepository {
 
     Document create(Document document);
 
+    /** Updates only detected/confirmed types for the matching document and parent Analysis. */
+    Optional<Document> updateTypes(Document document);
+
     List<Document> findByAnalysisId(UUID analysisId);
 
     Optional<Document> findByIdAndAnalysisId(UUID documentId, UUID analysisId);

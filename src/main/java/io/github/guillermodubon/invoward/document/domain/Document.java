@@ -76,6 +76,21 @@ public record Document(
                 sizeBytes, pageCount, sha256, storageKey, expiresAt, createdAt);
     }
 
+    /** Returns this document with a provider-suggested type, without applying role restrictions. */
+    public Document withDetectedType(DocumentType suggestion) {
+        return withTypes(suggestion, confirmedType);
+    }
+
+    /** Returns this document with a human-confirmed type validated against its role. */
+    public Document withConfirmedType(DocumentType confirmation) {
+        return withTypes(detectedType, confirmation);
+    }
+
+    private Document withTypes(DocumentType detected, DocumentType confirmed) {
+        return new Document(id, analysisId, role, detected, confirmed, originalFilename,
+                contentType, sizeBytes, pageCount, sha256, storageKey, expiresAt, createdAt);
+    }
+
     private static boolean isConfirmedTypeAllowed(DocumentRole role, DocumentType type) {
         return switch (role) {
             case REFERENCE -> type == DocumentType.QUOTE

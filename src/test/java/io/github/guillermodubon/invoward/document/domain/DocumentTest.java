@@ -72,6 +72,35 @@ class DocumentTest {
     }
 
     @Test
+    void detectedTypeUpdateAcceptsEveryEnumSuggestionForEitherRole() {
+        for (DocumentRole role : DocumentRole.values()) {
+            for (DocumentType suggestion : DocumentType.values()) {
+                assertEquals(suggestion, uploaded(role, null)
+                        .withDetectedType(suggestion).detectedType());
+            }
+        }
+    }
+
+    @Test
+    void confirmedTypeUpdateEnforcesRoleCompatibilityAndPreservesDetection() {
+        Document reference = uploaded(DocumentRole.REFERENCE, null)
+                .withDetectedType(DocumentType.INVOICE);
+        Document invoice = uploaded(DocumentRole.INVOICE, null)
+                .withDetectedType(DocumentType.PURCHASE_ORDER);
+
+        assertEquals(DocumentType.ESTIMATE,
+                reference.withConfirmedType(DocumentType.ESTIMATE).confirmedType());
+        assertEquals(DocumentType.INVOICE,
+                invoice.withConfirmedType(DocumentType.INVOICE).confirmedType());
+        assertEquals(DocumentType.INVOICE,
+                reference.withConfirmedType(DocumentType.QUOTE).detectedType());
+        assertThrows(IllegalArgumentException.class,
+                () -> reference.withConfirmedType(DocumentType.INVOICE));
+        assertThrows(IllegalArgumentException.class,
+                () -> invoice.withConfirmedType(DocumentType.QUOTE));
+    }
+
+    @Test
     void expiryMustBeAfterCreationAndStringRepresentationHidesStorageIdentifiers() {
         assertThrows(IllegalArgumentException.class,
                 () -> uploaded(DocumentRole.REFERENCE, CREATED_AT));
