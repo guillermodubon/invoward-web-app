@@ -4,6 +4,7 @@ import io.github.guillermodubon.invoward.document.application.port.DocumentRepos
 import io.github.guillermodubon.invoward.document.application.exception.DocumentRoleAlreadyExistsException;
 import io.github.guillermodubon.invoward.document.domain.Document;
 import io.github.guillermodubon.invoward.document.domain.DocumentRole;
+import io.github.guillermodubon.invoward.document.domain.DocumentType;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.junit.jupiter.api.Test;
@@ -59,6 +60,36 @@ class DocumentPersistenceIT {
         assertTrue(documentRepository.existsByAnalysisIdAndRole(analysisId, DocumentRole.REFERENCE));
         assertFalse(documentRepository.existsByAnalysisIdAndRole(analysisId, DocumentRole.INVOICE));
         assertEquals(125L, documentRepository.sumSizeBytesByAnalysisId(analysisId));
+    }
+
+    @Test
+    void persistsTypeUpdatesAndAcceptsRoleIncompatibleDetectionSuggestions() {
+        UUID analysisId = insertRegisteredAnalysis();
+        Document reference = newDocument(analysisId, DocumentRole.REFERENCE, 125L, null);
+        Document invoice = newDocument(analysisId, DocumentRole.INVOICE, 175L, null);
+        documentRepository.create(reference);
+        documentRepository.create(invoice);
+
+        for (DocumentType suggestion : DocumentType.values()) {
+            reference = documentRepository.updateTypes(reference.withDetectedType(suggestion))
+                    .orElseThrow();
+            invoice = documentRepository.updateTypes(invoice.withDetectedType(suggestion))
+                    .orElseThrow();
+            assertEquals(suggestion, reference.detectedType());
+            assertEquals(suggestion, invoice.detectedType());
+        }
+
+        reference = documentRepository.updateTypes(
+                reference.withConfirmedType(DocumentType.PURCHASE_ORDER)).orElseThrow();
+        invoice = documentRepository.updateTypes(
+                invoice.withConfirmedType(DocumentType.INVOICE)).orElseThrow();
+
+        assertEquals(reference, documentRepository.findByIdAndAnalysisId(
+                reference.id(), analysisId).orElseThrow());
+        assertEquals(invoice, documentRepository.findByIdAndAnalysisId(
+                invoice.id(), analysisId).orElseThrow());
+        assertEquals("reference.pdf", reference.originalFilename());
+        assertEquals("invoice.pdf", invoice.originalFilename());
     }
 
     @Test

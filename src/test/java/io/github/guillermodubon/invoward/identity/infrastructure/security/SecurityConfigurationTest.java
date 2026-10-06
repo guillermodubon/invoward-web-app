@@ -14,6 +14,9 @@ import io.github.guillermodubon.invoward.identity.infrastructure.persistence.rep
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJpaRepository;
 import io.github.guillermodubon.invoward.document.infrastructure.persistence.repository.SpringDataDocumentJpaRepository;
+import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedDocumentJpaRepository;
+import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedLineItemJpaRepository;
+import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractionCacheJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
@@ -75,6 +78,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -109,6 +113,15 @@ class SecurityConfigurationTest {
 
     @MockitoBean
     private SpringDataDocumentJpaRepository documentJpaRepository;
+
+    @MockitoBean
+    private SpringDataExtractedDocumentJpaRepository extractedDocumentJpaRepository;
+
+    @MockitoBean
+    private SpringDataExtractedLineItemJpaRepository extractedLineItemJpaRepository;
+
+    @MockitoBean
+    private SpringDataExtractionCacheJpaRepository extractionCacheJpaRepository;
 
     @MockitoBean
     private CurrentAccountService currentAccountService;
@@ -255,6 +268,158 @@ class SecurityConfigurationTest {
         mockMvc.perform(post("/api/analyses/{id}/status", analysisId)
                         .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
                                 .csrf().asHeader()))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void documentTypeDetectionPostKeepsCsrfEnabled() throws Exception {
+        String path = "/api/analyses/" + UUID.randomUUID() + "/documents/detect-types";
+        List<Filter> filters = filterChainProxy.getFilters(path);
+
+        assertTrue(filters.stream().anyMatch(CsrfFilter.class::isInstance));
+        assertCsrfFailure(post(path));
+        mockMvc.perform(post(path).header("X-CSRF-TOKEN", "invalid-token"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+    }
+
+    @Test
+    void extractionPostKeepsCsrfEnabled() throws Exception {
+        String path = "/api/analyses/" + UUID.randomUUID() + "/extract";
+        List<Filter> filters = filterChainProxy.getFilters(path);
+
+        assertTrue(filters.stream().anyMatch(CsrfFilter.class::isInstance));
+        assertCsrfFailure(post(path).contentType(APPLICATION_JSON)
+                .content("{\"referenceType\":\"PURCHASE_ORDER\",\"invoiceType\":\"INVOICE\"}"));
+        mockMvc.perform(post(path)
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"referenceType\":\"PURCHASE_ORDER\",\"invoiceType\":\"INVOICE\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+    }
+
+    @Test
+    void extractionReviewPutKeepsCsrfEnabled() throws Exception {
+        String path = "/api/analyses/" + UUID.randomUUID() + "/extraction";
+
+        assertTrue(filterChainProxy.getFilters(path).stream().anyMatch(CsrfFilter.class::isInstance));
+        assertCsrfFailure(put(path).contentType(APPLICATION_JSON).content("{}"));
+        mockMvc.perform(put(path)
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+    }
+
+    @Test
+    void extractionConfirmationPostKeepsCsrfEnabled() throws Exception {
+        String analysisId = UUID.randomUUID().toString();
+        String documentId = UUID.randomUUID().toString();
+        String path = "/api/analyses/" + analysisId + "/extraction/confirm";
+        String body = """
+                {"referenceDocumentId":"%s","referenceExpectedVersion":0,
+                 "invoiceDocumentId":"%s","invoiceExpectedVersion":0}
+                """.formatted(documentId, UUID.randomUUID());
+
+        assertTrue(filterChainProxy.getFilters(path).stream().anyMatch(CsrfFilter.class::isInstance));
+        assertCsrfFailure(post(path).contentType(APPLICATION_JSON).content(body));
+        mockMvc.perform(post(path)
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+    }
+
+    @Test
+    void extractionGetDoesNotRequireCsrfToken() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String path = "/api/analyses/" + analysisId + "/extraction";
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        assertTrue(filterChainProxy.getFilters(path).stream().anyMatch(CsrfFilter.class::isInstance));
+        mockMvc.perform(get(path))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+    }
+
+    @Test
+    void exactExtractionRoutesAreGuestAccessibleAfterOwnerResolution() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String root = "/api/analyses/" + analysisId;
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        mockMvc.perform(get(root + "/extraction"))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+
+        mockMvc.perform(post(root + "/documents/detect-types")
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(post(root + "/extract")
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader())
+                        .contentType(APPLICATION_JSON)
+                        .content("""
+                                {"referenceType":"PURCHASE_ORDER","invoiceType":"INVOICE"}
+                                """))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(put(root + "/extraction")
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader())
+                        .contentType(APPLICATION_JSON)
+                        .content(extractionReviewUpdateRequest()))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(post(root + "/extraction/confirm")
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader())
+                        .contentType(APPLICATION_JSON)
+                        .content(extractionConfirmationRequest()))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void extractionGuestMatchersDoNotExposeOtherMethodsNestedPathsOrFutureRoutes() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String root = "/api/analyses/" + analysisId;
+        var csrf = org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                .csrf().asHeader();
+
+        mockMvc.perform(get(root + "/extraction/confirm"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/extraction/confirm/extra").with(csrf))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/documents/detect-types/extra").with(csrf))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get(root + "/matches"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/matches/confirm").with(csrf))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/reconcile").with(csrf))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get(root + "/reconciliation"))
                 .andExpect(status().isUnauthorized());
     }
 
@@ -496,6 +661,24 @@ class SecurityConfigurationTest {
         return request(org.springframework.http.HttpMethod.valueOf(method), path)
                 .contentType(APPLICATION_JSON)
                 .content(body);
+    }
+
+    private static String extractionConfirmationRequest() {
+        return """
+                {"referenceDocumentId":"%s","referenceExpectedVersion":0,
+                 "invoiceDocumentId":"%s","invoiceExpectedVersion":0}
+                """.formatted(UUID.randomUUID(), UUID.randomUUID());
+    }
+
+    private static String extractionReviewUpdateRequest() {
+        return """
+                {"documents":[
+                  {"documentId":"%s","expectedVersion":0,"confirmedType":"PURCHASE_ORDER",
+                   "lines":[{"description":"Reference item","quantity":1,"unitPrice":10,"lineTotal":10}]},
+                  {"documentId":"%s","expectedVersion":0,"confirmedType":"INVOICE",
+                   "lines":[{"description":"Invoice item","quantity":1,"unitPrice":10,"lineTotal":10}]}
+                ]}
+                """.formatted(UUID.randomUUID(), UUID.randomUUID());
     }
 
     private MockHttpSession authenticatedSession() {

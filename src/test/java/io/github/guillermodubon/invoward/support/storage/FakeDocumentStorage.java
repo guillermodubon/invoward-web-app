@@ -27,7 +27,9 @@ public final class FakeDocumentStorage implements DocumentStorage {
 
     private final Map<String, StoredObject> objects = new java.util.HashMap<>();
     private final Map<Operation, Failure> failures = new EnumMap<>(Operation.class);
+    private final Map<Operation, Integer> operationCalls = new EnumMap<>(Operation.class);
     private final Clock clock;
+    private int downloadCalls;
 
     public FakeDocumentStorage() {
         this(Clock.systemUTC());
@@ -40,6 +42,7 @@ public final class FakeDocumentStorage implements DocumentStorage {
     @Override
     public synchronized void store(StorageObjectUpload upload) {
         Objects.requireNonNull(upload, "upload must not be null");
+        recordCall(Operation.STORE);
         failIfConfigured(Operation.STORE);
         try {
             byte[] bytes = Files.readAllBytes(upload.sourceFile());
@@ -56,6 +59,8 @@ public final class FakeDocumentStorage implements DocumentStorage {
     public synchronized void downloadTo(String storageKey, Path destination) {
         Objects.requireNonNull(storageKey, "storageKey must not be null");
         Objects.requireNonNull(destination, "destination must not be null");
+        downloadCalls++;
+        recordCall(Operation.DOWNLOAD);
         failIfConfigured(Operation.DOWNLOAD);
         StoredObject storedObject = objects.get(storageKey);
         if (storedObject == null) {
@@ -71,6 +76,7 @@ public final class FakeDocumentStorage implements DocumentStorage {
     @Override
     public synchronized void delete(String storageKey) {
         Objects.requireNonNull(storageKey, "storageKey must not be null");
+        recordCall(Operation.DELETE);
         failIfConfigured(Operation.DELETE);
         objects.remove(storageKey);
     }
@@ -85,6 +91,7 @@ public final class FakeDocumentStorage implements DocumentStorage {
         requireNonBlank(contentType, "contentType");
         requireNonBlank(downloadFilename, "downloadFilename");
         Objects.requireNonNull(ttl, "ttl must not be null");
+        recordCall(Operation.PRESIGN);
         failIfConfigured(Operation.PRESIGN);
         if (ttl.isNegative() || ttl.isZero()) {
             throw new IllegalArgumentException("ttl must be greater than 0");
@@ -98,6 +105,14 @@ public final class FakeDocumentStorage implements DocumentStorage {
 
     public synchronized int storedObjectCount() {
         return objects.size();
+    }
+
+    public synchronized int downloadCalls() {
+        return downloadCalls;
+    }
+
+    public synchronized int operationCalls(Operation operation) {
+        return operationCalls.getOrDefault(Objects.requireNonNull(operation), 0);
     }
 
     public synchronized Optional<byte[]> storedBytes(String storageKey) {
@@ -128,6 +143,12 @@ public final class FakeDocumentStorage implements DocumentStorage {
     public synchronized void clear() {
         objects.clear();
         failures.clear();
+        operationCalls.clear();
+        downloadCalls = 0;
+    }
+
+    private void recordCall(Operation operation) {
+        operationCalls.merge(operation, 1, Integer::sum);
     }
 
     private void failIfConfigured(Operation operation) {

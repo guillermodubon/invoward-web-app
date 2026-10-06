@@ -77,6 +77,81 @@ class AnalysisTest {
     }
 
     @Test
+    void transitionsUploadingAnalysisToClassifyingOnly() {
+        Analysis uploading = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1));
+
+        Analysis classifying = uploading.markClassifying(NOW.plusSeconds(2));
+
+        assertEquals(AnalysisStatus.CLASSIFYING, classifying.status());
+        assertEquals(uploading.version(), classifying.version());
+        assertEquals(uploading.retryable(), classifying.retryable());
+        assertEquals(uploading.createdAt(), classifying.createdAt());
+        assertEquals(NOW.plusSeconds(2), classifying.updatedAt());
+        assertThrows(IllegalStateException.class, () -> classifying.markClassifying(NOW.plusSeconds(3)));
+    }
+
+    @Test
+    void transitionsClassifyingAnalysisToAwaitingHumanExtractionConfirmation() {
+        Analysis classifying = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .markClassifying(NOW.plusSeconds(2));
+
+        Analysis awaitingConfirmation = classifying.awaitExtractionConfirmation(NOW.plusSeconds(3));
+
+        assertEquals(AnalysisStatus.AWAITING_CONFIRMATION, awaitingConfirmation.status());
+        assertEquals(classifying.id(), awaitingConfirmation.id());
+        assertEquals(classifying.owner(), awaitingConfirmation.owner());
+        assertEquals(classifying.version(), awaitingConfirmation.version());
+        assertEquals(classifying.priceTolerance(), awaitingConfirmation.priceTolerance());
+        assertEquals(classifying.reviewStatus(), awaitingConfirmation.reviewStatus());
+        assertFalse(awaitingConfirmation.retryable());
+        assertNull(awaitingConfirmation.failureCode());
+        assertNull(awaitingConfirmation.failureUserMessage());
+        assertNull(awaitingConfirmation.completedAt());
+        assertEquals(NOW.plusSeconds(3), awaitingConfirmation.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> awaitingConfirmation.awaitExtractionConfirmation(NOW.plusSeconds(4)));
+        assertThrows(IllegalArgumentException.class,
+                () -> classifying.awaitExtractionConfirmation(NOW.plusSeconds(1)));
+    }
+
+    @Test
+    void confirmationCopiesReviewedSummaryAndMovesAnalysisToMatchingWithoutCalculatingDifference() {
+        Analysis awaiting = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .markClassifying(NOW.plusSeconds(2))
+                .awaitExtractionConfirmation(NOW.plusSeconds(3));
+
+        Analysis matching = awaiting.confirmExtraction(
+                "PURCHASE_ORDER", "PO-1", "INV-1", "  Acme\u00a0  Parts  ", "USD",
+                new BigDecimal("100.0000"), new BigDecimal("115.0000"), NOW.plusSeconds(4));
+
+        assertEquals(AnalysisStatus.MATCHING, matching.status());
+        assertEquals(AnalysisReviewStatus.PENDING, matching.reviewStatus());
+        assertNull(matching.reconciliationStatus());
+        assertEquals("PURCHASE_ORDER", matching.referenceType());
+        assertEquals("PO-1", matching.referenceNumber());
+        assertEquals("INV-1", matching.invoiceNumber());
+        assertEquals("  Acme\u00a0  Parts  ", matching.supplierName());
+        assertEquals("acme parts", matching.supplierKey());
+        assertEquals("USD", matching.currency());
+        assertEquals(new BigDecimal("100.0000"), matching.referenceTotal());
+        assertEquals(new BigDecimal("115.0000"), matching.invoicedTotal());
+        assertNull(matching.difference());
+        assertFalse(matching.retryable());
+        assertNull(matching.completedAt());
+        assertEquals(NOW.plusSeconds(4), matching.updatedAt());
+        assertThrows(IllegalStateException.class, () -> matching.confirmExtraction(
+                "QUOTE", null, null, null, null, null, null, NOW.plusSeconds(5)));
+        assertThrows(IllegalArgumentException.class, () -> awaiting.confirmExtraction(
+                "QUOTE", null, null, null, null, null, null, NOW.plusSeconds(2)));
+    }
+
+    @Test
     void rejectsUploadTransitionsAfterAnalysisLeavesUploadStates() {
         Analysis created = Analysis.create(
                 UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);

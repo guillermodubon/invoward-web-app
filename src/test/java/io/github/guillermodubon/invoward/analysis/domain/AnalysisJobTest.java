@@ -72,6 +72,74 @@ class AnalysisJobTest {
     }
 
     @Test
+    void waitsForUserAtClassificationWithoutStartingOrChangingAttempts() {
+        AnalysisJob uploading = AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW)
+                .awaitMoreUploads(NOW.plusSeconds(1));
+
+        AnalysisJob classifying = uploading.waitForUserAtClassification(NOW.plusSeconds(2));
+
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, classifying.status());
+        assertEquals(AnalysisStatus.CLASSIFYING, classifying.currentStage());
+        assertEquals(uploading.attemptCount(), classifying.attemptCount());
+        assertEquals(uploading.retryable(), classifying.retryable());
+        assertEquals(uploading.startedAt(), classifying.startedAt());
+        assertEquals(uploading.completedAt(), classifying.completedAt());
+        assertEquals(uploading.createdAt(), classifying.createdAt());
+        assertEquals(NOW.plusSeconds(2), classifying.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> classifying.waitForUserAtClassification(NOW.plusSeconds(3)));
+    }
+
+    @Test
+    void waitsForUserAtExtractionReviewWithoutStartingAnAttempt() {
+        AnalysisJob classifying = AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW)
+                .awaitMoreUploads(NOW.plusSeconds(1))
+                .waitForUserAtClassification(NOW.plusSeconds(2));
+
+        AnalysisJob awaitingConfirmation = classifying.waitForExtractionConfirmation(NOW.plusSeconds(3));
+
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, awaitingConfirmation.status());
+        assertEquals(AnalysisStatus.AWAITING_CONFIRMATION, awaitingConfirmation.currentStage());
+        assertEquals(classifying.attemptCount(), awaitingConfirmation.attemptCount());
+        assertFalse(awaitingConfirmation.retryable());
+        assertNull(awaitingConfirmation.lastErrorCode());
+        assertNull(awaitingConfirmation.lastErrorMessage());
+        assertNull(awaitingConfirmation.startedAt());
+        assertNull(awaitingConfirmation.completedAt());
+        assertEquals(classifying.createdAt(), awaitingConfirmation.createdAt());
+        assertEquals(NOW.plusSeconds(3), awaitingConfirmation.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> awaitingConfirmation.waitForExtractionConfirmation(NOW.plusSeconds(4)));
+        assertThrows(IllegalArgumentException.class,
+                () -> classifying.waitForExtractionConfirmation(NOW.plusSeconds(1)));
+    }
+
+    @Test
+    void waitsForUserAtMatchingWithoutStartingAnAttempt() {
+        AnalysisJob awaitingConfirmation = AnalysisJob.waitingForUser(
+                UUID.randomUUID(), UUID.randomUUID(), NOW)
+                .awaitMoreUploads(NOW.plusSeconds(1))
+                .waitForUserAtClassification(NOW.plusSeconds(2))
+                .waitForExtractionConfirmation(NOW.plusSeconds(3));
+
+        AnalysisJob matching = awaitingConfirmation.waitForMatching(NOW.plusSeconds(4));
+
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, matching.status());
+        assertEquals(AnalysisStatus.MATCHING, matching.currentStage());
+        assertEquals(awaitingConfirmation.attemptCount(), matching.attemptCount());
+        assertFalse(matching.retryable());
+        assertNull(matching.lastErrorCode());
+        assertNull(matching.lastErrorMessage());
+        assertNull(matching.startedAt());
+        assertNull(matching.completedAt());
+        assertEquals(awaitingConfirmation.createdAt(), matching.createdAt());
+        assertEquals(NOW.plusSeconds(4), matching.updatedAt());
+        assertThrows(IllegalStateException.class, () -> matching.waitForMatching(NOW.plusSeconds(5)));
+        assertThrows(IllegalArgumentException.class,
+                () -> awaitingConfirmation.waitForMatching(NOW.plusSeconds(2)));
+    }
+
+    @Test
     void requiresIdentifiersAndValidStateAndTimestamps() {
         UUID jobId = UUID.randomUUID();
         UUID analysisId = UUID.randomUUID();

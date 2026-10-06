@@ -4,7 +4,7 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Persisted processing state for an Analysis. Only the initial state is created in this block. */
+/** Persisted processing state for one Analysis. */
 public record AnalysisJob(
         UUID id,
         UUID analysisId,
@@ -81,6 +81,50 @@ public record AnalysisJob(
                 completedAt,
                 createdAt,
                 now);
+    }
+
+    /** Keeps the job idle after classification, waiting for the user's type confirmation. */
+    public AnalysisJob waitForUserAtClassification(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER || currentStage != AnalysisStatus.UPLOADING) {
+            throw new IllegalStateException("Analysis job cannot wait for classification in its current state");
+        }
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+        return new AnalysisJob(
+                id, analysisId, AnalysisJobStatus.WAITING_FOR_USER, AnalysisStatus.CLASSIFYING,
+                attemptCount, false, lastErrorCode, lastErrorMessage, startedAt, completedAt,
+                createdAt, now);
+    }
+
+    /** Keeps synchronous extraction idle while its DRAFT results await human review. */
+    public AnalysisJob waitForExtractionConfirmation(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER || currentStage != AnalysisStatus.CLASSIFYING) {
+            throw new IllegalStateException("Analysis job cannot wait for extraction confirmation in its current state");
+        }
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+        return new AnalysisJob(
+                id, analysisId, AnalysisJobStatus.WAITING_FOR_USER, AnalysisStatus.AWAITING_CONFIRMATION,
+                attemptCount, false, null, null, null, null, createdAt, now);
+    }
+
+    /** Keeps matching unstarted while the Analysis waits for its next persisted stage. */
+    public AnalysisJob waitForMatching(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER
+                || currentStage != AnalysisStatus.AWAITING_CONFIRMATION) {
+            throw new IllegalStateException("Analysis job cannot wait for matching in its current state");
+        }
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+        return new AnalysisJob(
+                id, analysisId, AnalysisJobStatus.WAITING_FOR_USER, AnalysisStatus.MATCHING,
+                attemptCount, false, null, null, null, null, createdAt, now);
     }
 
     @Override

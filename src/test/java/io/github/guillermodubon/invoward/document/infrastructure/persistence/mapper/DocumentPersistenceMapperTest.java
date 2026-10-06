@@ -29,4 +29,21 @@ class DocumentPersistenceMapperTest {
         assertEquals(document.id(), entity.getId());
         assertEquals(document, mapper.toDomain(entity));
     }
+
+    @Test
+    void updatesTypeFieldsWithoutChangingDocumentMetadata() {
+        DocumentPersistenceMapper mapper = new DocumentPersistenceMapper();
+        Document original = new Document(
+                UUID.randomUUID(), UUID.randomUUID(), DocumentRole.REFERENCE,
+                null, null, "accepted-quote.pdf", "application/pdf", 42_000, 3,
+                "b".repeat(64), "guest/analysis/document.pdf",
+                Instant.parse("2026-10-01T12:00:00Z"), Instant.parse("2026-09-30T12:00:00Z"));
+        Document update = original.withDetectedType(DocumentType.INVOICE)
+                .withConfirmedType(DocumentType.PURCHASE_ORDER);
+        DocumentJpaEntity entity = mapper.toEntity(original);
+
+        mapper.updateTypes(update, entity);
+
+        assertEquals(update, mapper.toDomain(entity));
+    }
 }

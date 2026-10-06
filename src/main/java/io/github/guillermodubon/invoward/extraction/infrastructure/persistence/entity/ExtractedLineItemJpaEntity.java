@@ -72,6 +72,10 @@ public class ExtractedLineItemJpaEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    public static ExtractedLineItemJpaEntity create() {
+        return new ExtractedLineItemJpaEntity();
+    }
+
     public UUID getId() { return id; }
     public UUID getExtractedDocumentId() { return extractedDocumentId; }
     public void setExtractedDocumentId(UUID extractedDocumentId) { this.extractedDocumentId = extractedDocumentId; }
