@@ -205,6 +205,40 @@ public record Analysis(
                 now);
     }
 
+    /** Keeps matching results available for user review without starting reconciliation. */
+    public Analysis awaitMatchReview(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisStatus.MATCHING) {
+            throw new IllegalStateException("Analysis can await match review only while matching");
+        }
+        requireTransitionTime(now);
+        return withStatus(AnalysisStatus.AWAITING_MATCH_REVIEW, now);
+    }
+
+    /** Advances a fully matched Analysis, or a user-confirmed match set, to reconciliation. */
+    public Analysis beginReconciliation(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisStatus.MATCHING && status != AnalysisStatus.AWAITING_MATCH_REVIEW) {
+            throw new IllegalStateException("Analysis can begin reconciliation only after matching review");
+        }
+        requireTransitionTime(now);
+        return withStatus(AnalysisStatus.RECONCILING, now);
+    }
+
+    private void requireTransitionTime(Instant now) {
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+    }
+
+    private Analysis withStatus(AnalysisStatus nextStatus, Instant now) {
+        return new Analysis(
+                id, owner, nextStatus, reviewStatus, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance,
+                retryable, failureCode, failureUserMessage, version, completedAt, expiresAt, createdAt, now);
+    }
+
     private static String supplierKey(String supplierName) {
         if (supplierName == null || supplierName.isBlank()) {
             return null;
