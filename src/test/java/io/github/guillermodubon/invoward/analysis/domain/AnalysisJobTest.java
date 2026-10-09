@@ -140,6 +140,66 @@ class AnalysisJobTest {
     }
 
     @Test
+    void waitsForUserAtMatchReviewWithoutStartingAnAttempt() {
+        AnalysisJob matching = matchingJob();
+        Instant reviewAt = NOW.plusSeconds(5);
+
+        AnalysisJob awaitingReview = matching.waitForMatchReview(reviewAt);
+
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, awaitingReview.status());
+        assertEquals(AnalysisStatus.AWAITING_MATCH_REVIEW, awaitingReview.currentStage());
+        assertEquals(matching.attemptCount(), awaitingReview.attemptCount());
+        assertFalse(awaitingReview.retryable());
+        assertEquals(matching.lastErrorCode(), awaitingReview.lastErrorCode());
+        assertEquals(matching.lastErrorMessage(), awaitingReview.lastErrorMessage());
+        assertEquals(matching.startedAt(), awaitingReview.startedAt());
+        assertEquals(matching.completedAt(), awaitingReview.completedAt());
+        assertEquals(matching.createdAt(), awaitingReview.createdAt());
+        assertEquals(reviewAt, awaitingReview.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> awaitingReview.waitForMatchReview(reviewAt.plusSeconds(1)));
+        assertThrows(IllegalArgumentException.class,
+                () -> matching.waitForMatchReview(matching.updatedAt().minusSeconds(1)));
+    }
+
+    @Test
+    void waitsForUserAtReconciliationFromMatchingOrMatchReview() {
+        AnalysisJob matching = matchingJob();
+        Instant reconciliationAt = NOW.plusSeconds(5);
+
+        AnalysisJob afterAutomaticMatches = matching.waitForReconciliation(reconciliationAt);
+        AnalysisJob afterReviewedMatches = matching.waitForMatchReview(reconciliationAt)
+                .waitForReconciliation(reconciliationAt.plusSeconds(1));
+
+        assertWaitingAtReconciliation(matching, afterAutomaticMatches, reconciliationAt);
+        assertWaitingAtReconciliation(matching, afterReviewedMatches, reconciliationAt.plusSeconds(1));
+        assertThrows(IllegalStateException.class,
+                () -> afterAutomaticMatches.waitForReconciliation(reconciliationAt.plusSeconds(2)));
+        AnalysisJob awaitingConfirmation = AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW);
+        assertThrows(IllegalStateException.class,
+                () -> awaitingConfirmation.waitForReconciliation(NOW.plusSeconds(1)));
+    }
+
+    private static void assertWaitingAtReconciliation(AnalysisJob before, AnalysisJob after, Instant now) {
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, after.status());
+        assertEquals(AnalysisStatus.RECONCILING, after.currentStage());
+        assertEquals(before.attemptCount(), after.attemptCount());
+        assertFalse(after.retryable());
+        assertEquals(before.startedAt(), after.startedAt());
+        assertEquals(before.completedAt(), after.completedAt());
+        assertEquals(before.createdAt(), after.createdAt());
+        assertEquals(now, after.updatedAt());
+    }
+
+    private static AnalysisJob matchingJob() {
+        return AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW)
+                .awaitMoreUploads(NOW.plusSeconds(1))
+                .waitForUserAtClassification(NOW.plusSeconds(2))
+                .waitForExtractionConfirmation(NOW.plusSeconds(3))
+                .waitForMatching(NOW.plusSeconds(4));
+    }
+
+    @Test
     void requiresIdentifiersAndValidStateAndTimestamps() {
         UUID jobId = UUID.randomUUID();
         UUID analysisId = UUID.randomUUID();

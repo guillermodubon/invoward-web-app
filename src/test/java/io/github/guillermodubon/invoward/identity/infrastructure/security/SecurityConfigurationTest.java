@@ -17,6 +17,7 @@ import io.github.guillermodubon.invoward.document.infrastructure.persistence.rep
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedDocumentJpaRepository;
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedLineItemJpaRepository;
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractionCacheJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataLineItemMatchJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
@@ -122,6 +123,9 @@ class SecurityConfigurationTest {
 
     @MockitoBean
     private SpringDataExtractionCacheJpaRepository extractionCacheJpaRepository;
+
+    @MockitoBean
+    private SpringDataLineItemMatchJpaRepository lineItemMatchJpaRepository;
 
     @MockitoBean
     private CurrentAccountService currentAccountService;
@@ -413,14 +417,101 @@ class SecurityConfigurationTest {
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(post(root + "/documents/detect-types/extra").with(csrf))
                 .andExpect(status().isUnauthorized());
-        mockMvc.perform(get(root + "/matches"))
+        mockMvc.perform(get(root + "/matches/" + UUID.randomUUID()))
                 .andExpect(status().isUnauthorized());
-        mockMvc.perform(post(root + "/matches/confirm").with(csrf))
+        mockMvc.perform(request(org.springframework.http.HttpMethod.PATCH, root + "/matches/confirm/extra")
+                        .with(csrf)
+                        .contentType(APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/matches/other").with(csrf))
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(post(root + "/reconcile").with(csrf))
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(get(root + "/reconciliation"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void exactMatchRoutesAreGuestAccessibleAfterOwnerResolutionAndKeepCsrfEnabled() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String root = "/api/analyses/" + analysisId;
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+        var csrf = org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                .csrf().asHeader();
+
+        assertTrue(filterChainProxy.getFilters(root + "/matches").stream().anyMatch(CsrfFilter.class::isInstance));
+        mockMvc.perform(get(root + "/matches"))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+
+        mockMvc.perform(request(org.springframework.http.HttpMethod.PATCH, root + "/matches/" + UUID.randomUUID())
+                        .with(csrf)
+                        .contentType(APPLICATION_JSON)
+                        .content("""
+                                {"expectedVersion":0,"action":"CONFIRM"}
+                                """))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+        mockMvc.perform(post(root + "/matches/confirm").with(csrf))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+    }
+
+    @Test
+    void matchMutationRoutesRequireCsrfForGuestAndAuthenticatedRequests() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String root = "/api/analyses/" + analysisId;
+        String patchPath = root + "/matches/" + UUID.randomUUID();
+        String patchBody = """
+                {"expectedVersion":0,"action":"CONFIRM"}
+                """;
+
+        assertCsrfFailure(request(org.springframework.http.HttpMethod.PATCH, patchPath)
+                .contentType(APPLICATION_JSON).content(patchBody));
+        assertCsrfFailure(post(root + "/matches/confirm"));
+        assertCsrfFailure(request(org.springframework.http.HttpMethod.PATCH, patchPath)
+                .session(authenticatedSession()).contentType(APPLICATION_JSON).content(patchBody));
+        assertCsrfFailure(post(root + "/matches/confirm").session(authenticatedSession()));
+
+        mockMvc.perform(request(org.springframework.http.HttpMethod.PATCH, patchPath)
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content(patchBody))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+        mockMvc.perform(request(org.springframework.http.HttpMethod.PATCH, patchPath)
+                        .session(authenticatedSession())
+                        .header("X-CSRF-TOKEN", "invalid-token")
+                        .contentType(APPLICATION_JSON)
+                        .content(patchBody))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+        mockMvc.perform(post(root + "/matches/confirm")
+                        .header("X-CSRF-TOKEN", "invalid-token"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+        mockMvc.perform(post(root + "/matches/confirm")
+                        .session(authenticatedSession())
+                        .header("X-CSRF-TOKEN", "invalid-token"))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
     }
 
     @Test

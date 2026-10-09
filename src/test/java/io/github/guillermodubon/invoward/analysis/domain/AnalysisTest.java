@@ -152,6 +152,59 @@ class AnalysisTest {
     }
 
     @Test
+    void matchingCanWaitForMatchReviewWithoutChangingReconciliationData() {
+        Analysis matching = matchingAnalysis();
+        Instant reviewAt = NOW.plusSeconds(5);
+
+        Analysis awaitingReview = matching.awaitMatchReview(reviewAt);
+
+        assertEquals(AnalysisStatus.AWAITING_MATCH_REVIEW, awaitingReview.status());
+        assertEquals(matching.id(), awaitingReview.id());
+        assertEquals(matching.owner(), awaitingReview.owner());
+        assertEquals(matching.reviewStatus(), awaitingReview.reviewStatus());
+        assertNull(awaitingReview.reconciliationStatus());
+        assertEquals(matching.supplierName(), awaitingReview.supplierName());
+        assertEquals(matching.supplierKey(), awaitingReview.supplierKey());
+        assertEquals(matching.referenceTotal(), awaitingReview.referenceTotal());
+        assertEquals(matching.invoicedTotal(), awaitingReview.invoicedTotal());
+        assertNull(awaitingReview.difference());
+        assertFalse(awaitingReview.retryable());
+        assertNull(awaitingReview.completedAt());
+        assertEquals(matching.createdAt(), awaitingReview.createdAt());
+        assertEquals(reviewAt, awaitingReview.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> awaitingReview.awaitMatchReview(reviewAt.plusSeconds(1)));
+        assertThrows(IllegalArgumentException.class,
+                () -> matching.awaitMatchReview(matching.updatedAt().minusSeconds(1)));
+    }
+
+    @Test
+    void matchingAndReviewedMatchesCanAdvanceToReconciliationWithoutCalculatingDifferences() {
+        Analysis matching = matchingAnalysis();
+        Instant transitionAt = NOW.plusSeconds(5);
+
+        Analysis automaticReconciliation = matching.beginReconciliation(transitionAt);
+        Analysis reviewedReconciliation = matching.awaitMatchReview(transitionAt)
+                .beginReconciliation(transitionAt.plusSeconds(1));
+
+        for (Analysis reconciling : new Analysis[]{automaticReconciliation, reviewedReconciliation}) {
+            assertEquals(AnalysisStatus.RECONCILING, reconciling.status());
+            assertEquals(AnalysisReviewStatus.PENDING, reconciling.reviewStatus());
+            assertNull(reconciling.reconciliationStatus());
+            assertNull(reconciling.difference());
+            assertFalse(reconciling.retryable());
+            assertNull(reconciling.completedAt());
+        }
+        assertEquals(transitionAt, automaticReconciliation.updatedAt());
+        assertEquals(transitionAt.plusSeconds(1), reviewedReconciliation.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> reviewedReconciliation.beginReconciliation(transitionAt.plusSeconds(2)));
+        Analysis created = Analysis.create(UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);
+        assertThrows(IllegalStateException.class,
+                () -> created.beginReconciliation(NOW.plusSeconds(1)));
+    }
+
+    @Test
     void rejectsUploadTransitionsAfterAnalysisLeavesUploadStates() {
         Analysis created = Analysis.create(
                 UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);
@@ -224,6 +277,15 @@ class AnalysisTest {
                 null, null, null, null, null, null,
                 referenceTotal, invoicedTotal, difference, EXACT,
                 false, null, null, version, completedAt, expiresAt, createdAt, updatedAt);
+    }
+
+    private static Analysis matchingAnalysis() {
+        return Analysis.create(UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .markClassifying(NOW.plusSeconds(2))
+                .awaitExtractionConfirmation(NOW.plusSeconds(3))
+                .confirmExtraction("PURCHASE_ORDER", "PO-1", "INV-1", "Acme Parts", "USD",
+                        new BigDecimal("100.0000"), new BigDecimal("100.0000"), NOW.plusSeconds(4));
     }
 
     private static Analysis withStatus(Analysis analysis, AnalysisStatus status) {

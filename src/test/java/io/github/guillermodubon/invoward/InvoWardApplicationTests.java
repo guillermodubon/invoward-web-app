@@ -10,6 +10,7 @@ import io.github.guillermodubon.invoward.document.infrastructure.persistence.rep
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedDocumentJpaRepository;
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedLineItemJpaRepository;
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractionCacheJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataLineItemMatchJpaRepository;
 import io.github.guillermodubon.invoward.extraction.application.port.DocumentIntelligence;
 import io.github.guillermodubon.invoward.extraction.infrastructure.ai.disabled.DisabledDocumentIntelligence;
 import io.github.guillermodubon.invoward.document.application.service.UploadDocumentService;
@@ -17,6 +18,8 @@ import io.github.guillermodubon.invoward.identity.infrastructure.persistence.rep
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.application.port.AmbiguousLineMatcher;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.ai.disabled.DisabledAmbiguousLineMatcher;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -70,6 +73,9 @@ class InvoWardApplicationTests {
     @MockitoBean
     private SpringDataExtractionCacheJpaRepository extractionCacheJpaRepository;
 
+    @MockitoBean
+    private SpringDataLineItemMatchJpaRepository lineItemMatchJpaRepository;
+
     @Autowired
     private ApplicationContext applicationContext;
 
@@ -118,6 +124,12 @@ class InvoWardApplicationTests {
     void documentIntelligenceDefaultsToDisabledWithoutGeminiCredentials() {
         assertInstanceOf(DisabledDocumentIntelligence.class,
                 applicationContext.getBean(DocumentIntelligence.class));
+    }
+
+    @Test
+    void ambiguousLineMatchingDefaultsToDisabledWithoutGeminiCredentials() {
+        assertInstanceOf(DisabledAmbiguousLineMatcher.class,
+                applicationContext.getBean(AmbiguousLineMatcher.class));
     }
 
 }

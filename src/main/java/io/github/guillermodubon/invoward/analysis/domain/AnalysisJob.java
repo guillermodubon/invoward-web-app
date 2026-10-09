@@ -127,6 +127,41 @@ public record AnalysisJob(
                 attemptCount, false, null, null, null, null, createdAt, now);
     }
 
+    /** Keeps the job idle while match rows await user review. */
+    public AnalysisJob waitForMatchReview(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER || currentStage != AnalysisStatus.MATCHING) {
+            throw new IllegalStateException("Analysis job cannot wait for match review in its current state");
+        }
+        requireTransitionTime(now);
+        return withStage(AnalysisStatus.AWAITING_MATCH_REVIEW, now);
+    }
+
+    /** Keeps the job idle after automatic matching or user-confirmed match review. */
+    public AnalysisJob waitForReconciliation(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER
+                || (currentStage != AnalysisStatus.MATCHING
+                && currentStage != AnalysisStatus.AWAITING_MATCH_REVIEW)) {
+            throw new IllegalStateException("Analysis job cannot wait for reconciliation in its current state");
+        }
+        requireTransitionTime(now);
+        return withStage(AnalysisStatus.RECONCILING, now);
+    }
+
+    private void requireTransitionTime(Instant now) {
+        if (now.isBefore(updatedAt)) {
+            throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+    }
+
+    private AnalysisJob withStage(AnalysisStatus nextStage, Instant now) {
+        return new AnalysisJob(
+                id, analysisId, AnalysisJobStatus.WAITING_FOR_USER, nextStage,
+                attemptCount, false, lastErrorCode, lastErrorMessage,
+                startedAt, completedAt, createdAt, now);
+    }
+
     @Override
     public String toString() {
         return "AnalysisJob[id=" + id + ", analysisId=" + analysisId + ", status=" + status
