@@ -6,14 +6,13 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -21,7 +20,6 @@ import java.util.UUID;
 public class LineItemMatchJpaEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id;
 
@@ -58,6 +56,12 @@ public class LineItemMatchJpaEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    public static LineItemMatchJpaEntity create(UUID id) {
+        LineItemMatchJpaEntity entity = new LineItemMatchJpaEntity();
+        entity.id = Objects.requireNonNull(id, "id must not be null");
+        return entity;
+    }
+
     public UUID getId() { return id; }
     public UUID getAnalysisId() { return analysisId; }
     public void setAnalysisId(UUID analysisId) { this.analysisId = analysisId; }
@@ -72,6 +76,7 @@ public class LineItemMatchJpaEntity {
     public BigDecimal getConfidence() { return confidence; }
     public void setConfidence(BigDecimal confidence) { this.confidence = confidence; }
     public long getVersion() { return version; }
+    public void setVersion(long version) { this.version = version; }
     public Instant getReviewedAt() { return reviewedAt; }
     public void setReviewedAt(Instant reviewedAt) { this.reviewedAt = reviewedAt; }
     public Instant getCreatedAt() { return createdAt; }
