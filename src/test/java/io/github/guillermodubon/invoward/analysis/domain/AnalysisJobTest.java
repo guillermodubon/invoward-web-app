@@ -180,6 +180,52 @@ class AnalysisJobTest {
                 () -> awaitingConfirmation.waitForReconciliation(NOW.plusSeconds(1)));
     }
 
+    @Test
+    void awaitsReportGenerationWithoutStartingAnAttemptOrChangingAttemptTimestamps() {
+        Instant reconciliationAt = NOW.plusSeconds(5);
+        AnalysisJob reconciling = new AnalysisJob(
+                UUID.randomUUID(), UUID.randomUUID(), AnalysisJobStatus.WAITING_FOR_USER,
+                AnalysisStatus.RECONCILING, 2, true, "PREVIOUS_ERROR", "Previous attempt failed",
+                NOW.plusSeconds(1), NOW.plusSeconds(2), NOW, reconciliationAt);
+        Instant reportAt = NOW.plusSeconds(6);
+
+        AnalysisJob reportGeneration = reconciling.awaitReportGeneration(reportAt);
+
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, reportGeneration.status());
+        assertEquals(AnalysisStatus.GENERATING_REPORT, reportGeneration.currentStage());
+        assertEquals(reconciling.attemptCount(), reportGeneration.attemptCount());
+        assertFalse(reportGeneration.retryable());
+        assertEquals(reconciling.lastErrorCode(), reportGeneration.lastErrorCode());
+        assertEquals(reconciling.lastErrorMessage(), reportGeneration.lastErrorMessage());
+        assertEquals(reconciling.startedAt(), reportGeneration.startedAt());
+        assertEquals(reconciling.completedAt(), reportGeneration.completedAt());
+        assertEquals(reconciling.createdAt(), reportGeneration.createdAt());
+        assertEquals(reportAt, reportGeneration.updatedAt());
+    }
+
+    @Test
+    void rejectsReportGenerationWaitFromWrongStatusOrStageAndInvalidTime() {
+        AnalysisJob reconciling = AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW)
+                .awaitMoreUploads(NOW.plusSeconds(1))
+                .waitForUserAtClassification(NOW.plusSeconds(2))
+                .waitForExtractionConfirmation(NOW.plusSeconds(3))
+                .waitForMatching(NOW.plusSeconds(4))
+                .waitForReconciliation(NOW.plusSeconds(5));
+
+        assertThrows(NullPointerException.class, () -> reconciling.awaitReportGeneration(null));
+        assertThrows(IllegalArgumentException.class,
+                () -> reconciling.awaitReportGeneration(reconciling.updatedAt().minusSeconds(1)));
+        assertThrows(IllegalStateException.class,
+                () -> reconciling.awaitReportGeneration(NOW.plusSeconds(6)).awaitReportGeneration(NOW.plusSeconds(7)));
+
+        AnalysisJob wrongStage = AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW);
+        assertThrows(IllegalStateException.class, () -> wrongStage.awaitReportGeneration(NOW.plusSeconds(1)));
+        AnalysisJob wrongStatus = new AnalysisJob(
+                UUID.randomUUID(), UUID.randomUUID(), AnalysisJobStatus.QUEUED,
+                AnalysisStatus.RECONCILING, 0, false, null, null, null, null, NOW, NOW);
+        assertThrows(IllegalStateException.class, () -> wrongStatus.awaitReportGeneration(NOW.plusSeconds(1)));
+    }
+
     private static void assertWaitingAtReconciliation(AnalysisJob before, AnalysisJob after, Instant now) {
         assertEquals(AnalysisJobStatus.WAITING_FOR_USER, after.status());
         assertEquals(AnalysisStatus.RECONCILING, after.currentStage());

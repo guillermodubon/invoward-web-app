@@ -44,7 +44,6 @@ public record Analysis(
 
         requireNonnegative(referenceTotal, "referenceTotal");
         requireNonnegative(invoicedTotal, "invoicedTotal");
-        requireNonnegative(difference, "difference");
         if (version < 0) {
             throw new IllegalArgumentException("version must not be negative");
         }
@@ -223,6 +222,22 @@ public record Analysis(
         }
         requireTransitionTime(now);
         return withStatus(AnalysisStatus.RECONCILING, now);
+    }
+
+    /** Completes reconciliation with its original result and signed invoice-minus-reference difference. */
+    public Analysis completeReconciliation(
+            AnalysisReconciliationStatus result, BigDecimal difference, Instant now) {
+        Objects.requireNonNull(result, "result must not be null");
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisStatus.RECONCILING) {
+            throw new IllegalStateException("Analysis can complete reconciliation only while reconciling");
+        }
+        requireTransitionTime(now);
+        return new Analysis(
+                id, owner, AnalysisStatus.GENERATING_REPORT, reviewStatus, result,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance,
+                retryable, failureCode, failureUserMessage, version, completedAt, expiresAt, createdAt, now);
     }
 
     private void requireTransitionTime(Instant now) {
