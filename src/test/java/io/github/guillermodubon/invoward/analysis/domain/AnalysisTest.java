@@ -205,6 +205,58 @@ class AnalysisTest {
     }
 
     @Test
+    void completesReconciliationWithOriginalResultAndSignedDifference() {
+        Analysis reconciling = matchingAnalysis().beginReconciliation(NOW.plusSeconds(5));
+        Instant completedAt = NOW.plusSeconds(6);
+
+        Analysis completed = reconciling.completeReconciliation(
+                AnalysisReconciliationStatus.REVIEW_REQUIRED, new BigDecimal("-15.2500"), completedAt);
+
+        assertEquals(AnalysisStatus.GENERATING_REPORT, completed.status());
+        assertEquals(AnalysisReconciliationStatus.REVIEW_REQUIRED, completed.reconciliationStatus());
+        assertEquals(new BigDecimal("-15.2500"), completed.difference());
+        assertEquals(reconciling.id(), completed.id());
+        assertEquals(reconciling.owner(), completed.owner());
+        assertEquals(reconciling.reviewStatus(), completed.reviewStatus());
+        assertEquals(reconciling.supplierName(), completed.supplierName());
+        assertEquals(reconciling.supplierKey(), completed.supplierKey());
+        assertEquals(reconciling.referenceType(), completed.referenceType());
+        assertEquals(reconciling.referenceNumber(), completed.referenceNumber());
+        assertEquals(reconciling.invoiceNumber(), completed.invoiceNumber());
+        assertEquals(reconciling.currency(), completed.currency());
+        assertEquals(reconciling.referenceTotal(), completed.referenceTotal());
+        assertEquals(reconciling.invoicedTotal(), completed.invoicedTotal());
+        assertEquals(reconciling.priceTolerance(), completed.priceTolerance());
+        assertEquals(reconciling.retryable(), completed.retryable());
+        assertEquals(reconciling.version(), completed.version());
+        assertEquals(reconciling.completedAt(), completed.completedAt());
+        assertEquals(reconciling.expiresAt(), completed.expiresAt());
+        assertEquals(reconciling.createdAt(), completed.createdAt());
+        assertEquals(completedAt, completed.updatedAt());
+
+        Analysis matched = reconciling.completeReconciliation(
+                AnalysisReconciliationStatus.MATCHED, null, completedAt);
+        assertEquals(AnalysisReconciliationStatus.MATCHED, matched.reconciliationStatus());
+        assertNull(matched.difference());
+    }
+
+    @Test
+    void rejectsReconciliationCompletionOutsideReconcilingStateOrWithInvalidArguments() {
+        Analysis reconciling = matchingAnalysis().beginReconciliation(NOW.plusSeconds(5));
+
+        assertThrows(IllegalStateException.class,
+                () -> matchingAnalysis().completeReconciliation(
+                        AnalysisReconciliationStatus.MATCHED, BigDecimal.ZERO, NOW.plusSeconds(6)));
+        assertThrows(NullPointerException.class,
+                () -> reconciling.completeReconciliation(null, BigDecimal.ZERO, NOW.plusSeconds(6)));
+        assertThrows(NullPointerException.class,
+                () -> reconciling.completeReconciliation(AnalysisReconciliationStatus.MATCHED, null, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> reconciling.completeReconciliation(
+                        AnalysisReconciliationStatus.MATCHED, BigDecimal.ZERO, reconciling.updatedAt().minusSeconds(1)));
+    }
+
+    @Test
     void rejectsUploadTransitionsAfterAnalysisLeavesUploadStates() {
         Analysis created = Analysis.create(
                 UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);
@@ -240,15 +292,16 @@ class AnalysisTest {
     }
 
     @Test
-    void rejectsNegativeTotalsAndNegativeVersion() {
+    void rejectsNegativeTotalsAndVersionButAllowsSignedDifference() {
         RegisteredUserOwner owner = new RegisteredUserOwner(UUID.randomUUID());
 
         assertThrows(IllegalArgumentException.class,
                 () -> validAnalysis(owner, null, NOW, NOW, null, new BigDecimal("-0.01"), null, null, 0));
         assertThrows(IllegalArgumentException.class,
                 () -> validAnalysis(owner, null, NOW, NOW, null, null, new BigDecimal("-0.01"), null, 0));
-        assertThrows(IllegalArgumentException.class,
-                () -> validAnalysis(owner, null, NOW, NOW, null, null, null, new BigDecimal("-0.01"), 0));
+        Analysis negativeDifference = validAnalysis(
+                owner, null, NOW, NOW, null, null, null, new BigDecimal("-0.01"), 0);
+        assertEquals(new BigDecimal("-0.01"), negativeDifference.difference());
         assertThrows(IllegalArgumentException.class,
                 () -> validAnalysis(owner, null, NOW, NOW, null, null, null, null, -1));
     }

@@ -149,6 +149,16 @@ public record AnalysisJob(
         return withStage(AnalysisStatus.RECONCILING, now);
     }
 
+    /** Leaves reconciliation idle and ready for the report-generation stage without starting a worker attempt. */
+    public AnalysisJob awaitReportGeneration(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER || currentStage != AnalysisStatus.RECONCILING) {
+            throw new IllegalStateException("Analysis job cannot await report generation in its current state");
+        }
+        requireTransitionTime(now);
+        return withStage(AnalysisStatus.GENERATING_REPORT, now);
+    }
+
     private void requireTransitionTime(Instant now) {
         if (now.isBefore(updatedAt)) {
             throw new IllegalArgumentException("now must not be before updatedAt");
