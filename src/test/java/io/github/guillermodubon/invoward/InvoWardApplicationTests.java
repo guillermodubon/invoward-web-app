@@ -11,6 +11,10 @@ import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.r
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractedLineItemJpaRepository;
 import io.github.guillermodubon.invoward.extraction.infrastructure.persistence.repository.SpringDataExtractionCacheJpaRepository;
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataLineItemMatchJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDuplicateInvoiceCandidateJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataReconciliationLineJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyJpaRepository;
+import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyEvidenceJpaRepository;
 import io.github.guillermodubon.invoward.extraction.application.port.DocumentIntelligence;
 import io.github.guillermodubon.invoward.extraction.infrastructure.ai.disabled.DisabledDocumentIntelligence;
 import io.github.guillermodubon.invoward.document.application.service.UploadDocumentService;
@@ -75,6 +79,18 @@ class InvoWardApplicationTests {
 
     @MockitoBean
     private SpringDataLineItemMatchJpaRepository lineItemMatchJpaRepository;
+
+    @MockitoBean
+    private SpringDataDuplicateInvoiceCandidateJpaRepository duplicateInvoiceCandidateJpaRepository;
+
+    @MockitoBean
+    private SpringDataReconciliationLineJpaRepository reconciliationLineJpaRepository;
+
+    @MockitoBean
+    private SpringDataDiscrepancyJpaRepository discrepancyJpaRepository;
+
+    @MockitoBean
+    private SpringDataDiscrepancyEvidenceJpaRepository discrepancyEvidenceJpaRepository;
 
     @Autowired
     private ApplicationContext applicationContext;

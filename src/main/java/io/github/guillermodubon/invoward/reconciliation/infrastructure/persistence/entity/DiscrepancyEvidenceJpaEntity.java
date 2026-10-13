@@ -5,8 +5,6 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import org.hibernate.annotations.JdbcTypeCode;
@@ -14,6 +12,7 @@ import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -21,7 +20,6 @@ import java.util.UUID;
 public class DiscrepancyEvidenceJpaEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id;
 
@@ -47,6 +45,12 @@ public class DiscrepancyEvidenceJpaEntity {
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
+
+    public static DiscrepancyEvidenceJpaEntity create(UUID id) {
+        DiscrepancyEvidenceJpaEntity entity = new DiscrepancyEvidenceJpaEntity();
+        entity.id = Objects.requireNonNull(id, "id must not be null");
+        return entity;
+    }
 
     public UUID getId() { return id; }
     public UUID getDiscrepancyId() { return discrepancyId; }
