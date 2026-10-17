@@ -241,6 +241,53 @@ class AnalysisTest {
     }
 
     @Test
+    void completesReportGenerationAndPreservesReconciliationSnapshot() {
+        Analysis before = matchingAnalysis().beginReconciliation(NOW.plusSeconds(5))
+                .completeReconciliation(AnalysisReconciliationStatus.REVIEW_REQUIRED,
+                        new BigDecimal("-15.2500"), NOW.plusSeconds(6));
+        Instant generatedAt = NOW.plusSeconds(7);
+
+        Analysis completed = before.completeReportGeneration(generatedAt);
+
+        assertEquals(AnalysisStatus.COMPLETED, completed.status());
+        assertEquals(generatedAt, completed.completedAt());
+        assertEquals(generatedAt, completed.updatedAt());
+        assertFalse(completed.retryable());
+        assertEquals(before.id(), completed.id());
+        assertEquals(before.owner(), completed.owner());
+        assertEquals(before.reviewStatus(), completed.reviewStatus());
+        assertEquals(before.reconciliationStatus(), completed.reconciliationStatus());
+        assertEquals(before.supplierName(), completed.supplierName());
+        assertEquals(before.supplierKey(), completed.supplierKey());
+        assertEquals(before.referenceType(), completed.referenceType());
+        assertEquals(before.referenceNumber(), completed.referenceNumber());
+        assertEquals(before.invoiceNumber(), completed.invoiceNumber());
+        assertEquals(before.currency(), completed.currency());
+        assertEquals(before.referenceTotal(), completed.referenceTotal());
+        assertEquals(before.invoicedTotal(), completed.invoicedTotal());
+        assertEquals(before.difference(), completed.difference());
+        assertEquals(before.priceTolerance(), completed.priceTolerance());
+        assertEquals(before.version(), completed.version());
+        assertEquals(before.expiresAt(), completed.expiresAt());
+        assertEquals(before.createdAt(), completed.createdAt());
+    }
+
+    @Test
+    void rejectsReportCompletionOutsideGeneratingReportOrWithInvalidTime() {
+        Analysis generatingReport = matchingAnalysis().beginReconciliation(NOW.plusSeconds(5))
+                .completeReconciliation(AnalysisReconciliationStatus.MATCHED, null, NOW.plusSeconds(6));
+
+        assertThrows(NullPointerException.class, () -> generatingReport.completeReportGeneration(null));
+        assertThrows(IllegalArgumentException.class,
+                () -> generatingReport.completeReportGeneration(generatingReport.updatedAt().minusSeconds(1)));
+        assertThrows(IllegalStateException.class,
+                () -> matchingAnalysis().completeReportGeneration(NOW.plusSeconds(1)));
+        assertThrows(IllegalStateException.class,
+                () -> generatingReport.completeReportGeneration(NOW.plusSeconds(7))
+                        .completeReportGeneration(NOW.plusSeconds(8)));
+    }
+
+    @Test
     void rejectsReconciliationCompletionOutsideReconcilingStateOrWithInvalidArguments() {
         Analysis reconciling = matchingAnalysis().beginReconciliation(NOW.plusSeconds(5));
 

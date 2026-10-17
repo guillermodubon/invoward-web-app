@@ -34,6 +34,10 @@ import io.github.guillermodubon.invoward.reconciliation.infrastructure.persisten
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataReconciliationLineJpaRepository;
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyJpaRepository;
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyEvidenceJpaRepository;
+import io.github.guillermodubon.invoward.reporting.application.service.GenerateReportService;
+import io.github.guillermodubon.invoward.reporting.application.service.GetGeneratedReportService;
+import io.github.guillermodubon.invoward.reporting.application.service.ExportReconciliationCsvService;
+import io.github.guillermodubon.invoward.reporting.infrastructure.persistence.repository.SpringDataGeneratedReportJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
@@ -154,6 +158,18 @@ class SecurityConfigurationTest {
 
     @MockitoBean
     private SpringDataDiscrepancyEvidenceJpaRepository discrepancyEvidenceJpaRepository;
+
+    @MockitoBean
+    private SpringDataGeneratedReportJpaRepository generatedReportJpaRepository;
+
+    @MockitoBean
+    private GenerateReportService generateReportService;
+
+    @MockitoBean
+    private GetGeneratedReportService getGeneratedReportService;
+
+    @MockitoBean
+    private ExportReconciliationCsvService exportReconciliationCsvService;
 
     @MockitoBean
     private CurrentAccountService currentAccountService;
@@ -408,6 +424,53 @@ class SecurityConfigurationTest {
     }
 
     @Test
+    void reportPostRequiresCsrf() throws Exception {
+        String path = "/api/analyses/" + UUID.randomUUID() + "/report";
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        assertTrue(filterChainProxy.getFilters(path).stream().anyMatch(CsrfFilter.class::isInstance));
+        assertCsrfFailure(post(path));
+        assertCsrfFailure(post(path).session(authenticatedSession()));
+
+        mockMvc.perform(post(path)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+    }
+
+    @Test
+    void reportAndCsvGetsAreGuestCompatibleAndDoNotRequireCsrf() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String reportPath = "/api/analyses/" + analysisId + "/report";
+        String csvPath = "/api/analyses/" + analysisId + "/export.csv";
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        assertTrue(filterChainProxy.getFilters(reportPath).stream().anyMatch(CsrfFilter.class::isInstance));
+        assertTrue(filterChainProxy.getFilters(csvPath).stream().anyMatch(CsrfFilter.class::isInstance));
+        mockMvc.perform(get(reportPath))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+        mockMvc.perform(get(csvPath))
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+
+        org.mockito.Mockito.verify(getGeneratedReportService, org.mockito.Mockito.never()).get(any(), any());
+        org.mockito.Mockito.verify(exportReconciliationCsvService, org.mockito.Mockito.never()).export(any(), any());
+    }
+
+    @Test
     void reconcilePostWithAuthenticatedOwnerAndCsrfReachesControllerAndReturns200() throws Exception {
         UUID analysisId = UUID.randomUUID();
         UUID userId = UUID.fromString("a3d9151b-50d3-42c4-9c08-9637795af0c1");
@@ -591,7 +654,19 @@ class SecurityConfigurationTest {
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(get(root + "/discrepancies/" + UUID.randomUUID() + "/evidence/extra"))
                 .andExpect(status().isUnauthorized());
-        mockMvc.perform(get(root + "/report"))
+        mockMvc.perform(get(root + "/report/history"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get(root + "/history"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get(root + "/share"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get(root + "/export.csv/extra"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/report/extra").with(csrf))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/export.csv").with(csrf))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(request(org.springframework.http.HttpMethod.DELETE, root + "/report").with(csrf))
                 .andExpect(status().isUnauthorized());
     }
 

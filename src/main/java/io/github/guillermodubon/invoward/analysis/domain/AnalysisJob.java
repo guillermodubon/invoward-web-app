@@ -35,10 +35,10 @@ public record AnalysisJob(
         if (startedAt != null && (startedAt.isBefore(createdAt) || startedAt.isAfter(updatedAt))) {
             throw new IllegalArgumentException("startedAt must be between createdAt and updatedAt");
         }
-        if (completedAt != null && (startedAt == null
-                || completedAt.isBefore(startedAt)
+        if (completedAt != null && ((startedAt != null && completedAt.isBefore(startedAt))
+                || completedAt.isBefore(createdAt)
                 || completedAt.isAfter(updatedAt))) {
-            throw new IllegalArgumentException("completedAt must follow startedAt and not exceed updatedAt");
+            throw new IllegalArgumentException("completedAt must not precede its start or exceed updatedAt");
         }
     }
 
@@ -157,6 +157,18 @@ public record AnalysisJob(
         }
         requireTransitionTime(now);
         return withStage(AnalysisStatus.GENERATING_REPORT, now);
+    }
+
+    /** Completes report generation; synchronous user-driven work may not have a worker startedAt. */
+    public AnalysisJob completeReportGeneration(Instant generatedAt) {
+        Objects.requireNonNull(generatedAt, "generatedAt must not be null");
+        if (status != AnalysisJobStatus.WAITING_FOR_USER || currentStage != AnalysisStatus.GENERATING_REPORT) {
+            throw new IllegalStateException("Analysis job can complete only after report generation");
+        }
+        requireTransitionTime(generatedAt);
+        return new AnalysisJob(
+                id, analysisId, AnalysisJobStatus.COMPLETED, AnalysisStatus.COMPLETED,
+                attemptCount, false, null, null, startedAt, generatedAt, createdAt, generatedAt);
     }
 
     private void requireTransitionTime(Instant now) {

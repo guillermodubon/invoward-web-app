@@ -240,6 +240,20 @@ public record Analysis(
                 retryable, failureCode, failureUserMessage, version, completedAt, expiresAt, createdAt, now);
     }
 
+    /** Completes the synchronous report stage after its PDF has been persisted. */
+    public Analysis completeReportGeneration(Instant generatedAt) {
+        Objects.requireNonNull(generatedAt, "generatedAt must not be null");
+        if (status != AnalysisStatus.GENERATING_REPORT) {
+            throw new IllegalStateException("Analysis can complete report generation only while generating a report");
+        }
+        requireTransitionTime(generatedAt);
+        return new Analysis(
+                id, owner, AnalysisStatus.COMPLETED, reviewStatus, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance,
+                false, failureCode, failureUserMessage, version, generatedAt, expiresAt, createdAt, generatedAt);
+    }
+
     private void requireTransitionTime(Instant now) {
         if (now.isBefore(updatedAt)) {
             throw new IllegalArgumentException("now must not be before updatedAt");

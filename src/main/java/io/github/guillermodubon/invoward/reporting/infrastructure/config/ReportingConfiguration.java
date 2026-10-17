@@ -1,0 +1,9 @@
+package io.github.guillermodubon.invoward.reporting.infrastructure.config;
+
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration(proxyBeanMethods = false)
+@EnableConfigurationProperties(ReportingProperties.class)
+public class ReportingConfiguration {
+}

@@ -204,6 +204,49 @@ class AnalysisJobTest {
     }
 
     @Test
+    void completesReportGenerationWithoutInventingWorkerStartTime() {
+        AnalysisJob reportGeneration = matchingJob()
+                .waitForReconciliation(NOW.plusSeconds(5))
+                .awaitReportGeneration(NOW.plusSeconds(6));
+        Instant generatedAt = NOW.plusSeconds(7);
+
+        AnalysisJob completed = reportGeneration.completeReportGeneration(generatedAt);
+
+        assertEquals(AnalysisJobStatus.COMPLETED, completed.status());
+        assertEquals(AnalysisStatus.COMPLETED, completed.currentStage());
+        assertEquals(generatedAt, completed.completedAt());
+        assertEquals(generatedAt, completed.updatedAt());
+        assertEquals(reportGeneration.attemptCount(), completed.attemptCount());
+        assertFalse(completed.retryable());
+        assertNull(completed.lastErrorCode());
+        assertNull(completed.lastErrorMessage());
+        assertNull(completed.startedAt());
+        assertEquals(reportGeneration.createdAt(), completed.createdAt());
+    }
+
+    @Test
+    void rejectsReportCompletionFromWrongStatusOrStageAndInvalidTime() {
+        AnalysisJob reportGeneration = matchingJob()
+                .waitForReconciliation(NOW.plusSeconds(5))
+                .awaitReportGeneration(NOW.plusSeconds(6));
+
+        assertThrows(NullPointerException.class, () -> reportGeneration.completeReportGeneration(null));
+        assertThrows(IllegalArgumentException.class,
+                () -> reportGeneration.completeReportGeneration(reportGeneration.updatedAt().minusSeconds(1)));
+        assertThrows(IllegalStateException.class,
+                () -> matchingJob().completeReportGeneration(NOW.plusSeconds(5)));
+        assertThrows(IllegalStateException.class,
+                () -> reportGeneration.completeReportGeneration(NOW.plusSeconds(7))
+                        .completeReportGeneration(NOW.plusSeconds(8)));
+
+        AnalysisJob queuedAtReportStage = new AnalysisJob(
+                UUID.randomUUID(), UUID.randomUUID(), AnalysisJobStatus.QUEUED,
+                AnalysisStatus.GENERATING_REPORT, 0, false, null, null, null, null, NOW, NOW);
+        assertThrows(IllegalStateException.class,
+                () -> queuedAtReportStage.completeReportGeneration(NOW.plusSeconds(1)));
+    }
+
+    @Test
     void rejectsReportGenerationWaitFromWrongStatusOrStageAndInvalidTime() {
         AnalysisJob reconciling = AnalysisJob.waitingForUser(UUID.randomUUID(), UUID.randomUUID(), NOW)
                 .awaitMoreUploads(NOW.plusSeconds(1))
@@ -271,8 +314,14 @@ class AnalysisJobTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new AnalysisJob(jobId, analysisId, AnalysisJobStatus.WAITING_FOR_USER,
                         AnalysisStatus.CREATED, 0, false, null, null, NOW.plusSeconds(1), null, NOW, NOW));
+        AnalysisJob synchronouslyCompleted = new AnalysisJob(
+                jobId, analysisId, AnalysisJobStatus.COMPLETED,
+                AnalysisStatus.COMPLETED, 0, false, null, null, null, NOW, NOW, NOW);
+        assertNull(synchronouslyCompleted.startedAt());
+        assertEquals(NOW, synchronouslyCompleted.completedAt());
         assertThrows(IllegalArgumentException.class,
                 () -> new AnalysisJob(jobId, analysisId, AnalysisJobStatus.COMPLETED,
-                        AnalysisStatus.COMPLETED, 0, false, null, null, null, NOW, NOW, NOW));
+                        AnalysisStatus.COMPLETED, 0, false, null, null, null,
+                        NOW.minusSeconds(1), NOW, NOW));
     }
 }
