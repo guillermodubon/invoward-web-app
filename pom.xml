@@ -30,6 +30,7 @@
         <java.version>21</java.version>
         <aws.sdk.version>2.55.10</aws.sdk.version>
         <pdfbox.version>3.0.8</pdfbox.version>
+        <openhtmltopdf.version>1.1.97</openhtmltopdf.version>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -66,6 +67,11 @@
                 <groupId>com.google.http-client</groupId>
                 <artifactId>google-http-client-apache-v2</artifactId>
                 <version>2.2.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.pdfbox</groupId>
+                <artifactId>xmpbox</artifactId>
+                <version>${pdfbox.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -145,6 +151,11 @@
             <groupId>org.apache.pdfbox</groupId>
             <artifactId>pdfbox</artifactId>
             <version>${pdfbox.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.github.openhtmltopdf</groupId>
+            <artifactId>openhtmltopdf-pdfbox</artifactId>
+            <version>${openhtmltopdf.version}</version>
         </dependency>
 
         <dependency>
