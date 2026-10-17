@@ -15,6 +15,9 @@ import io.github.guillermodubon.invoward.reconciliation.infrastructure.persisten
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataReconciliationLineJpaRepository;
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyJpaRepository;
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyEvidenceJpaRepository;
+import io.github.guillermodubon.invoward.reporting.infrastructure.persistence.repository.SpringDataGeneratedReportJpaRepository;
+import io.github.guillermodubon.invoward.reporting.application.port.ReportGenerator;
+import io.github.guillermodubon.invoward.reporting.infrastructure.pdf.OpenHtmlToPdfReportGenerator;
 import io.github.guillermodubon.invoward.extraction.application.port.DocumentIntelligence;
 import io.github.guillermodubon.invoward.extraction.infrastructure.ai.disabled.DisabledDocumentIntelligence;
 import io.github.guillermodubon.invoward.document.application.service.UploadDocumentService;
@@ -92,6 +95,9 @@ class InvoWardApplicationTests {
     @MockitoBean
     private SpringDataDiscrepancyEvidenceJpaRepository discrepancyEvidenceJpaRepository;
 
+    @MockitoBean
+    private SpringDataGeneratedReportJpaRepository generatedReportJpaRepository;
+
     @Autowired
     private ApplicationContext applicationContext;
 
@@ -146,6 +152,12 @@ class InvoWardApplicationTests {
     void ambiguousLineMatchingDefaultsToDisabledWithoutGeminiCredentials() {
         assertInstanceOf(DisabledAmbiguousLineMatcher.class,
                 applicationContext.getBean(AmbiguousLineMatcher.class));
+    }
+
+    @Test
+    void openHtmlToPdfReportGeneratorIsWiredAsTheReportGenerator() {
+        assertInstanceOf(OpenHtmlToPdfReportGenerator.class,
+                applicationContext.getBean(ReportGenerator.class));
     }
 
 }
