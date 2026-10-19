@@ -20,6 +20,8 @@ import io.github.guillermodubon.invoward.extraction.domain.ExtractedLineItem;
 import io.github.guillermodubon.invoward.extraction.domain.ExtractionSource;
 import io.github.guillermodubon.invoward.identity.application.model.GuestSession;
 import io.github.guillermodubon.invoward.identity.application.service.GuestSessionService;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
+import io.github.guillermodubon.invoward.processing.infrastructure.ProcessingWorker;
 import io.github.guillermodubon.invoward.reconciliation.application.port.LineItemMatchRepository;
 import io.github.guillermodubon.invoward.reconciliation.application.service.RunLineItemMatchingService;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
@@ -33,6 +35,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -101,6 +104,13 @@ class ReconciliationFullWorkflowIntegrationIT {
     @Autowired
     private RunLineItemMatchingService runLineItemMatchingService;
 
+    @Autowired
+    private ProcessingWorker processingWorker;
+
+    // Control stage delivery so this regression can inspect reconciliation before reporting runs.
+    @MockitoBean
+    private ProcessingWakePort processingWakePort;
+
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
         PostgresTestContainer.configure(registry);
@@ -125,8 +135,21 @@ class ReconciliationFullWorkflowIntegrationIT {
         CsrfTicket csrf = csrfTicket(baseUri);
         HttpResponse<String> reconcile = postWithoutBody(
                 baseUri, "/api/analyses/" + fixture.analysisId() + "/reconcile", csrf, guest.id());
-        assertEquals(200, reconcile.statusCode(), reconcile.body());
-        JsonNode persistedResult = objectMapper.readTree(reconcile.body());
+        assertEquals(202, reconcile.statusCode(), reconcile.body());
+        assertEquals("/api/analyses/" + fixture.analysisId() + "/status",
+                reconcile.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store", reconcile.headers().firstValue("Cache-Control").orElseThrow());
+        JsonNode queuedStatus = objectMapper.readTree(reconcile.body());
+        assertEquals("RECONCILING", queuedStatus.get("status").asString());
+        assertEquals("QUEUED", queuedStatus.get("jobStatus").asString());
+        assertEquals(0, countRows("invoward.reconciliation_lines", fixture.analysisId()));
+        assertEquals(0, countRows("invoward.discrepancies", fixture.analysisId()));
+
+        processingWorker.process(fixture.analysisId());
+        HttpResponse<String> reconciliation = get(
+                baseUri, "/api/analyses/" + fixture.analysisId() + "/reconciliation", csrf, guest.id());
+        assertEquals(200, reconciliation.statusCode(), reconciliation.body());
+        JsonNode persistedResult = objectMapper.readTree(reconciliation.body());
         assertEquals("GENERATING_REPORT", persistedResult.get("analysisStatus").asString());
         assertEquals("REVIEW_REQUIRED", persistedResult.get("reconciliationStatus").asString());
         assertEquals(1, persistedResult.get("summary").get("lineCount").asInt());
@@ -226,7 +249,8 @@ class ReconciliationFullWorkflowIntegrationIT {
         analysis = analysisRepository.update(analysis.confirmExtraction(
                 "QUOTE", "Q-WORKFLOW-1", "I-WORKFLOW-1", "Workflow Test Supplier", "USD",
                 BigDecimal.TEN, BigDecimal.TEN, extractionConfirmedAt));
-        analysisJobRepository.update(job.waitForMatching(extractionConfirmedAt));
+        analysisJobRepository.update(job.queueMatching(extractionConfirmedAt)
+                .startQueuedAttempt(extractionConfirmedAt, 3));
         return new WorkflowFixture(analysisId, owner, referenceLineId, invoiceLineId);
     }
 
@@ -259,7 +283,7 @@ class ReconciliationFullWorkflowIntegrationIT {
         Analysis analysis = analysisRepository.findOwnedById(analysisId, owner, clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(analysisId).orElseThrow();
         assertEquals(expectedStage, analysis.status());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(AnalysisJobStatus.QUEUED, job.status());
         assertEquals(expectedStage, job.currentStage());
         assertFalse(job.retryable());
         assertNull(job.startedAt());

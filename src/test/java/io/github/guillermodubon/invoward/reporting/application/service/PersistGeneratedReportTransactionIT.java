@@ -105,7 +105,7 @@ class PersistGeneratedReportTransactionIT {
         assertEquals(AnalysisStatus.COMPLETED, completedJob.currentStage());
         assertEquals(candidate.generatedAt(), completedJob.completedAt());
         assertEquals(candidate.generatedAt(), completedJob.updatedAt());
-        assertNull(completedJob.startedAt());
+        assertEquals(fixture.job().startedAt(), completedJob.startedAt());
         assertEquals(fixture.job().attemptCount(), completedJob.attemptCount());
         assertFalse(completedJob.retryable());
     }
@@ -150,8 +150,9 @@ class PersistGeneratedReportTransactionIT {
         AnalysisJob unchangedJob = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
         assertEquals(AnalysisStatus.GENERATING_REPORT, unchanged.status());
         assertNull(unchanged.completedAt());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, unchangedJob.status());
+        assertEquals(AnalysisJobStatus.RUNNING, unchangedJob.status());
         assertEquals(AnalysisStatus.GENERATING_REPORT, unchangedJob.currentStage());
+        assertEquals(fixture.job().startedAt(), unchangedJob.startedAt());
         assertNull(unchangedJob.completedAt());
     }
 
@@ -206,7 +207,7 @@ class PersistGeneratedReportTransactionIT {
     }
 
     private Fixture reportReadyFixture() {
-        Instant start = clock.instant().minusSeconds(60);
+        Instant start = clock.instant().truncatedTo(ChronoUnit.MICROS).minusSeconds(60);
         UUID userId = jdbcTemplate.execute((ConnectionCallback<UUID>) DatabaseFixtures::insertUser);
         AnalysisOwner owner = new RegisteredUserOwner(userId);
         UUID analysisId = UUID.randomUUID();
@@ -230,7 +231,8 @@ class PersistGeneratedReportTransactionIT {
         analysis = analysisRepository.update(analysis.completeReconciliation(
                 AnalysisReconciliationStatus.REVIEW_REQUIRED,
                 new BigDecimal("15.2500"), start.plusSeconds(6)));
-        job = analysisJobRepository.update(job.awaitReportGeneration(start.plusSeconds(6)));
+        job = analysisJobRepository.update(job.queueReportGeneration(start.plusSeconds(6)));
+        job = analysisJobRepository.update(job.startQueuedAttempt(start.plusSeconds(7), 3));
         return new Fixture(analysisId, owner, analysis, job);
     }
 

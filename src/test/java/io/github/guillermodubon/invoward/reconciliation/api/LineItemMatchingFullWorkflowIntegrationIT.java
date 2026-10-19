@@ -26,6 +26,7 @@ import io.github.guillermodubon.invoward.reconciliation.application.service.RunL
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchMethod;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
 import io.github.guillermodubon.invoward.support.ai.FakeAmbiguousLineMatcher;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.junit.jupiter.api.Test;
@@ -113,6 +114,9 @@ class LineItemMatchingFullWorkflowIntegrationIT {
     @MockitoBean
     private AmbiguousLineMatcher ambiguousLineMatcher;
 
+    @MockitoBean
+    private ProcessingWakePort processingWakePort;
+
     private final FakeAmbiguousLineMatcher fakeMatcher = new FakeAmbiguousLineMatcher();
 
     @DynamicPropertySource
@@ -193,15 +197,23 @@ class LineItemMatchingFullWorkflowIntegrationIT {
                 matchesPath(fixture.analysisId()) + "/confirm",
                 csrf,
                 guest.id().toString());
-        assertEquals(204, confirmResponse.statusCode(), confirmResponse.body());
+        assertEquals(202, confirmResponse.statusCode(), confirmResponse.body());
+        JsonNode confirmationStatus = objectMapper.readTree(confirmResponse.body());
+        assertEquals(fixture.analysisId().toString(), confirmationStatus.get("analysisId").asString());
+        assertEquals("RECONCILING", confirmationStatus.get("status").asString());
+        assertEquals("QUEUED", confirmationStatus.get("jobStatus").asString());
+        assertEquals("RECONCILING", confirmationStatus.get("currentStage").asString());
+        assertEquals("/api/analyses/" + fixture.analysisId() + "/status",
+                confirmResponse.headers().firstValue("Location").orElseThrow());
 
         List<LineItemMatch> persisted = lineItemMatchRepository.findByAnalysisId(fixture.analysisId());
         assertEquals(generated.size(), persisted.size());
         assertCompleteCover(fixture, persisted);
         assertTrue(persisted.stream().allMatch(match -> match.reviewedAt() != null));
-        assertWorkflow(fixture, AnalysisStatus.RECONCILING);
+        assertWorkflow(fixture, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED);
         assertEquals(0, countRows("invoward.reconciliation_lines", fixture.analysisId()));
         assertEquals(0, countRows("invoward.discrepancies", fixture.analysisId()));
+        org.mockito.Mockito.verify(processingWakePort).wake(fixture.analysisId());
     }
 
     private MatchingFixture createMatchingFixture(AnalysisOwner owner) {
@@ -221,12 +233,6 @@ class LineItemMatchingFullWorkflowIntegrationIT {
         Instant extractionReviewAt = startedAt.plusSeconds(3);
         analysis = analysisRepository.update(analysis.awaitExtractionConfirmation(extractionReviewAt));
         job = analysisJobRepository.update(job.waitForExtractionConfirmation(extractionReviewAt));
-        Instant matchingAt = startedAt.plusSeconds(4);
-        analysis = analysisRepository.update(analysis.confirmExtraction(
-                "QUOTE", "Q-1", "I-1", "Test Vendor", "USD",
-                BigDecimal.TEN, BigDecimal.TEN, matchingAt));
-        analysisJobRepository.update(job.waitForMatching(matchingAt));
-
         Instant documentsAt = startedAt.plusSeconds(5);
         Document reference = createDocument(
                 analysis, DocumentRole.REFERENCE, DocumentType.QUOTE, documentsAt);
@@ -239,6 +245,12 @@ class LineItemMatchingFullWorkflowIntegrationIT {
                 new LineSpec(" abc-123 ", "invoice widget"),
                 new LineSpec(null, AMBIGUOUS_DESCRIPTION),
                 new LineSpec(null, AMBIGUOUS_DESCRIPTION)), documentsAt.plusSeconds(1));
+        Instant matchingAt = startedAt.plusSeconds(7);
+        analysis = analysisRepository.update(analysis.confirmExtraction(
+                "QUOTE", "Q-1", "I-1", "Test Vendor", "USD",
+                BigDecimal.TEN, BigDecimal.TEN, matchingAt));
+        job = analysisJobRepository.update(job.queueMatching(matchingAt));
+        analysisJobRepository.update(job.startQueuedAttempt(matchingAt.plusSeconds(1), 3));
         return new MatchingFixture(analysisId, owner, referenceLineIds, invoiceLineIds);
     }
 
@@ -282,11 +294,16 @@ class LineItemMatchingFullWorkflowIntegrationIT {
     }
 
     private void assertWorkflow(MatchingFixture fixture, AnalysisStatus expectedStatus) {
+        assertWorkflow(fixture, expectedStatus, AnalysisJobStatus.WAITING_FOR_USER);
+    }
+
+    private void assertWorkflow(
+            MatchingFixture fixture, AnalysisStatus expectedStatus, AnalysisJobStatus expectedJobStatus) {
         Analysis analysis = analysisRepository.findOwnedById(
                 fixture.analysisId(), fixture.owner(), clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
         assertEquals(expectedStatus, analysis.status());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(expectedJobStatus, job.status());
         assertEquals(expectedStatus, job.currentStage());
         assertEquals(0, job.attemptCount());
         assertFalse(job.retryable());

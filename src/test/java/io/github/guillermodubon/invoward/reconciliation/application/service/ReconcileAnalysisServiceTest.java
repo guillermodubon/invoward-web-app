@@ -18,6 +18,7 @@ import io.github.guillermodubon.invoward.extraction.application.model.PersistedE
 import io.github.guillermodubon.invoward.extraction.domain.ExtractedDocument;
 import io.github.guillermodubon.invoward.extraction.domain.ExtractedLineItem;
 import io.github.guillermodubon.invoward.extraction.domain.ExtractionSource;
+import io.github.guillermodubon.invoward.reconciliation.application.exception.AnalysisReconciliationNotAllowedException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.ReconciliationConflictException;
 import io.github.guillermodubon.invoward.reconciliation.application.model.DuplicateInvoiceCandidate;
 import io.github.guillermodubon.invoward.reconciliation.application.model.DuplicateInvoiceSignal;
@@ -54,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -157,11 +159,27 @@ class ReconcileAnalysisServiceTest {
     }
 
     @Test
+    void requiresTheWorkerToHaveClaimedReconciliationBeforeRunningTheEngine() {
+        Fixture fixture = fixture();
+        AnalysisJob idleJob = AnalysisJob.waitingForUser(uuid(4), ANALYSIS_ID, NOW.minusSeconds(30));
+        when(analysisRepository.findOwnedById(ANALYSIS_ID, OWNER, NOW))
+                .thenReturn(Optional.of(fixture.input().analysis()));
+        when(reconciliationLineRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(0L);
+        when(discrepancyRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(0L);
+        when(analysisJobRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(Optional.of(idleJob));
+
+        assertThrows(AnalysisReconciliationNotAllowedException.class,
+                () -> service.reconcile(ANALYSIS_ID, OWNER));
+
+        verifyNoInteractions(inputAssembler, duplicateInvoiceDetector, persistenceTransaction);
+    }
+
+    @Test
     void persistedCompleteResultIsReturnedWithoutReassemblingOrRecomputing() {
         Fixture fixture = fixture();
         Analysis completed = fixture.input().analysis().completeReconciliation(
                 AnalysisReconciliationStatus.MATCHED, BigDecimal.ZERO.setScale(4), NOW);
-        AnalysisJob completedJob = fixture.job().awaitReportGeneration(NOW);
+        AnalysisJob completedJob = fixture.job().queueReportGeneration(NOW);
         ReconciliationLine line = reconciledLine(fixture.match());
         when(analysisRepository.findOwnedById(ANALYSIS_ID, OWNER, NOW)).thenReturn(Optional.of(completed));
         when(reconciliationLineRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(1L);
@@ -180,6 +198,27 @@ class ReconcileAnalysisServiceTest {
         assertEquals(List.of(line), result.lines());
         assertEquals(AnalysisReconciliationStatus.MATCHED, result.reconciliationStatus());
         verifyNoInteractions(inputAssembler, persistenceTransaction);
+    }
+
+    @Test
+    void persistedResultRemainsIdempotentAcrossReportQueuedRunningFailedAndCompletedStates() {
+        Fixture fixture = fixture();
+        Analysis reconciliationComplete = fixture.input().analysis().completeReconciliation(
+                AnalysisReconciliationStatus.MATCHED, BigDecimal.ZERO.setScale(4), NOW.minusSeconds(4));
+        AnalysisJob reportQueued = fixture.job().queueReportGeneration(NOW.minusSeconds(3));
+        AnalysisJob reportRunning = reportQueued.startQueuedAttempt(NOW.minusSeconds(2), 3);
+        AnalysisJob reportFailed = reportRunning.failCurrentAttempt(
+                "REPORT_GENERATION_FAILED", "Report generation failed", false, 3, NOW.minusSeconds(1));
+        Analysis failedAnalysis = reconciliationComplete.failProcessing(
+                AnalysisStatus.GENERATING_REPORT, "REPORT_GENERATION_FAILED",
+                "Report generation failed.", false, NOW);
+        Analysis completedAnalysis = reconciliationComplete.completeReportGeneration(NOW);
+        AnalysisJob completedJob = reportRunning.completeReportGeneration(NOW);
+
+        assertPersistedResultReturned(fixture, reconciliationComplete, reportQueued);
+        assertPersistedResultReturned(fixture, reconciliationComplete, reportRunning);
+        assertPersistedResultReturned(fixture, failedAnalysis, reportFailed);
+        assertPersistedResultReturned(fixture, completedAnalysis, completedJob);
     }
 
     @Test
@@ -234,7 +273,8 @@ class ReconcileAnalysisServiceTest {
                 .waitForExtractionConfirmation(createdAt.plusSeconds(3))
                 .waitForMatching(createdAt.plusSeconds(4))
                 .waitForMatchReview(createdAt.plusSeconds(5))
-                .waitForReconciliation(createdAt.plusSeconds(6));
+                .queueReconciliation(createdAt.plusSeconds(6))
+                .startQueuedAttempt(createdAt.plusSeconds(7), 3);
 
         Document reference = document(DocumentRole.REFERENCE, DocumentType.QUOTE, "b");
         Document invoice = document(DocumentRole.INVOICE, DocumentType.INVOICE, "a");
@@ -286,6 +326,29 @@ class ReconcileAnalysisServiceTest {
                 "SKU-1", "SKU-1", "Widget", "Widget", BigDecimal.ONE, BigDecimal.ONE,
                 BigDecimal.TEN, BigDecimal.TEN, BigDecimal.TEN, BigDecimal.TEN,
                 BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, NOW.minusSeconds(1));
+    }
+
+    private void assertPersistedResultReturned(Fixture fixture, Analysis analysis, AnalysisJob job) {
+        reset(analysisRepository, analysisJobRepository, lineItemMatchRepository,
+                reconciliationLineRepository, discrepancyRepository, duplicateInvoiceWarningReader,
+                linePositionReader, inputAssembler, duplicateInvoiceDetector, persistenceTransaction);
+        ReconciliationLine line = reconciledLine(fixture.match());
+        when(analysisRepository.findOwnedById(ANALYSIS_ID, OWNER, NOW)).thenReturn(Optional.of(analysis));
+        when(reconciliationLineRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(1L);
+        when(discrepancyRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(0L);
+        when(analysisJobRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(Optional.of(job));
+        when(lineItemMatchRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of(fixture.match()));
+        when(reconciliationLineRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of(line));
+        when(discrepancyRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of());
+        when(duplicateInvoiceWarningReader.read(analysis)).thenReturn(DuplicateInvoiceWarning.none());
+        when(linePositionReader.read(analysis)).thenReturn(Map.of(uuid(5), 0, uuid(6), 0));
+
+        ReconciliationResult result = service.reconcile(ANALYSIS_ID, OWNER);
+
+        assertEquals(analysis.status(), result.analysisStatus());
+        assertEquals(AnalysisReconciliationStatus.MATCHED, result.reconciliationStatus());
+        assertEquals(List.of(line), result.lines());
+        verifyNoInteractions(inputAssembler, persistenceTransaction, duplicateInvoiceDetector);
     }
 
     private static UUID uuid(int suffix) {

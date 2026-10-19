@@ -20,8 +20,8 @@ import io.github.guillermodubon.invoward.extraction.domain.ExtractionSource;
 import io.github.guillermodubon.invoward.identity.application.model.GuestSession;
 import io.github.guillermodubon.invoward.identity.application.service.GuestSessionService;
 import io.github.guillermodubon.invoward.reconciliation.application.port.LineItemMatchRepository;
-import io.github.guillermodubon.invoward.reconciliation.application.service.RunLineItemMatchingService;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
+import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchMethod;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
 import io.github.guillermodubon.invoward.reporting.application.port.GeneratedReportRepository;
 import io.github.guillermodubon.invoward.reporting.domain.GeneratedReport;
@@ -107,9 +107,6 @@ class ReportingFullWorkflowIntegrationIT {
     private LineItemMatchRepository lineItemMatchRepository;
 
     @Autowired
-    private RunLineItemMatchingService runLineItemMatchingService;
-
-    @Autowired
     private GeneratedReportRepository generatedReportRepository;
 
     @Autowired
@@ -131,9 +128,6 @@ class ReportingFullWorkflowIntegrationIT {
         GuestSessionOwner owner = new GuestSessionOwner(guest.id(), guest.expiresAt());
         UUID analysisId = createConfirmedAnalysis(owner);
 
-        List<LineItemMatch> matches = runLineItemMatchingService.run(analysisId, owner);
-        assertEquals(1, matches.size());
-        assertEquals(LineMatchStatus.MATCHED, matches.getFirst().status());
         assertEquals(1, countRows("invoward.line_item_matches", analysisId));
         assertWorkflow(analysisId, owner, AnalysisStatus.RECONCILING);
 
@@ -141,24 +135,26 @@ class ReportingFullWorkflowIntegrationIT {
         CsrfTicket csrf = csrfTicket(baseUri);
         HttpResponse<String> reconciled = postWithoutBody(
                 baseUri, "/api/analyses/" + analysisId + "/reconcile", csrf, guest.id());
-        assertEquals(200, reconciled.statusCode(), reconciled.body());
-        JsonNode reconciliation = objectMapper.readTree(reconciled.body());
-        assertEquals("GENERATING_REPORT", reconciliation.get("analysisStatus").asString());
+        assertEquals(202, reconciled.statusCode(), reconciled.body());
+        assertEquals("/api/analyses/" + analysisId + "/status",
+                reconciled.headers().firstValue("Location").orElseThrow());
+        assertEquals("RECONCILING", objectMapper.readTree(reconciled.body()).get("status").asString());
+
+        JsonNode completedStatus = awaitCompletedStatus(baseUri, analysisId, csrf, guest.id());
+        assertEquals("COMPLETED", completedStatus.get("status").asString());
+        assertEquals("COMPLETED", completedStatus.get("jobStatus").asString());
+        HttpResponse<String> reconciliationResponse = get(
+                baseUri, reconciliationPath(analysisId), csrf, guest.id());
+        assertEquals(200, reconciliationResponse.statusCode(), reconciliationResponse.body());
+        JsonNode reconciliation = objectMapper.readTree(reconciliationResponse.body());
+        assertEquals("COMPLETED", reconciliation.get("analysisStatus").asString());
         assertEquals(1, reconciliation.get("summary").get("lineCount").asInt());
         assertEquals(1, reconciliation.get("summary").get("openDiscrepancyCount").asInt());
         JsonNode priceDiscrepancy = findDiscrepancy(reconciliation, "UNIT_PRICE_MISMATCH");
         UUID discrepancyId = UUID.fromString(priceDiscrepancy.get("id").asString());
         assertEquals(1, countRows("invoward.reconciliation_lines", analysisId));
         assertEquals(1, countRows("invoward.discrepancies", analysisId));
-        assertWorkflow(analysisId, owner, AnalysisStatus.GENERATING_REPORT);
-
-        HttpResponse<String> created = postWithoutBody(
-                baseUri, reportPath(analysisId), csrf, guest.id());
-        assertEquals(201, created.statusCode(), created.body());
-        assertEquals("/api/analyses/" + analysisId + "/report",
-                created.headers().firstValue("Location").orElseThrow());
-        assertEquals("no-store", created.headers().firstValue("Cache-Control").orElseThrow());
-
+        assertWorkflow(analysisId, owner, AnalysisStatus.COMPLETED);
         GeneratedReport persistedReport = generatedReportRepository.findByAnalysisId(analysisId).orElseThrow();
         assertEquals(1, countRows("invoward.generated_reports", analysisId));
         Instant persistedAnalysisExpiry = analysisRepository.findOwnedById(analysisId, owner, clock.instant())
@@ -170,7 +166,12 @@ class ReportingFullWorkflowIntegrationIT {
         assertTrue(new String(storedPdf, 0, Math.min(storedPdf.length, 8), StandardCharsets.US_ASCII)
                 .startsWith("%PDF-"));
         assertEquals(storedPdf.length, persistedReport.sizeBytes());
-        assertWorkflow(analysisId, owner, AnalysisStatus.COMPLETED);
+
+        HttpResponse<String> created = postWithoutBody(
+                baseUri, reportPath(analysisId), csrf, guest.id());
+        assertEquals(200, created.statusCode(), created.body());
+        assertEquals("no-store", created.headers().firstValue("Cache-Control").orElseThrow());
+        assertEquals("COMPLETED", objectMapper.readTree(created.body()).get("status").asString());
 
         HttpResponse<String> read = get(baseUri, reportPath(analysisId), csrf, guest.id());
         assertEquals(200, read.statusCode(), read.body());
@@ -194,7 +195,7 @@ class ReportingFullWorkflowIntegrationIT {
         HttpResponse<String> repeated = postWithoutBody(
                 baseUri, reportPath(analysisId), csrf, guest.id());
         assertEquals(200, repeated.statusCode(), repeated.body());
-        assertEquals(persistedReport.id().toString(), objectMapper.readTree(repeated.body()).get("id").asString());
+        assertEquals("COMPLETED", objectMapper.readTree(repeated.body()).get("status").asString());
         assertEquals(1, countRows("invoward.generated_reports", analysisId));
         assertEquals(1, reportStorage.storedObjectCount(), "The persisted PDF snapshot must not be regenerated.");
 
@@ -234,16 +235,27 @@ class ReportingFullWorkflowIntegrationIT {
 
         Document reference = createDocument(analysis, DocumentRole.REFERENCE, DocumentType.QUOTE, start.plusSeconds(4));
         Document invoice = createDocument(analysis, DocumentRole.INVOICE, DocumentType.INVOICE, start.plusSeconds(4));
-        createConfirmedExtraction(reference, "Reference report workflow evidence", new BigDecimal("10.0000"),
+        PersistedExtraction referenceExtraction = createConfirmedExtraction(
+                reference, "Reference report workflow evidence", new BigDecimal("10.0000"),
                 start.plusSeconds(5));
-        createConfirmedExtraction(invoice, "Invoice report workflow evidence", new BigDecimal("12.0000"),
+        PersistedExtraction invoiceExtraction = createConfirmedExtraction(
+                invoice, "Invoice report workflow evidence", new BigDecimal("12.0000"),
                 start.plusSeconds(5));
 
         Instant confirmedAt = start.plusSeconds(7);
-        analysisRepository.update(analysis.confirmExtraction(
+        analysis = analysisRepository.update(analysis.confirmExtraction(
                 "QUOTE", "Q-REPORT-WORKFLOW", "I-REPORT-WORKFLOW", "Reporting Workflow Supplier", "USD",
                 BigDecimal.TEN, BigDecimal.TEN, confirmedAt));
-        analysisJobRepository.update(job.waitForMatching(confirmedAt));
+        job = analysisJobRepository.update(job.waitForMatching(confirmedAt));
+        Instant reconciliationAt = confirmedAt.plusSeconds(1);
+        lineItemMatchRepository.create(new LineItemMatch(
+                UUID.randomUUID(), analysisId,
+                referenceExtraction.lineItemIds().getFirst(),
+                invoiceExtraction.lineItemIds().getFirst(),
+                LineMatchStatus.MATCHED, LineMatchMethod.SKU,
+                new BigDecimal("1.0000"), 0, null, reconciliationAt, reconciliationAt));
+        analysisRepository.update(analysis.beginReconciliation(reconciliationAt));
+        analysisJobRepository.update(job.waitForReconciliation(reconciliationAt));
         return analysisId;
     }
 
@@ -255,7 +267,7 @@ class ReportingFullWorkflowIntegrationIT {
                 .withConfirmedType(type));
     }
 
-    private void createConfirmedExtraction(
+    private PersistedExtraction createConfirmedExtraction(
             Document document, String sourceText, BigDecimal unitPrice, Instant createdAt) {
         List<ExtractedLineItem> lines = List.of(new ExtractedLineItem(
                 0, "REPORT-WORKFLOW-001", "Workflow widget", BigDecimal.ONE, "each", unitPrice,
@@ -267,7 +279,7 @@ class ReportingFullWorkflowIntegrationIT {
         PersistedExtraction created = extractedDocumentRepository.create(
                 document.id(), draft, "reporting-workflow-v1", "test-model", 1, createdAt);
         Instant confirmedAt = createdAt.plusSeconds(1);
-        extractedDocumentRepository.confirm(
+        return extractedDocumentRepository.confirm(
                 created.withExtraction(created.extraction().confirm(confirmedAt)), confirmedAt).orElseThrow();
     }
 
@@ -300,6 +312,25 @@ class ReportingFullWorkflowIntegrationIT {
         assertEquals("X-CSRF-TOKEN", csrf.get("headerName").asString());
         assertFalse(csrf.get("token").asString().isBlank());
         return new CsrfTicket(cookieValue(response, SESSION_COOKIE), csrf.get("token").asString());
+    }
+
+    private JsonNode awaitCompletedStatus(
+            URI baseUri, UUID analysisId, CsrfTicket csrf, UUID guestSessionId) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        do {
+            HttpResponse<String> response = get(
+                    baseUri, "/api/analyses/" + analysisId + "/status", csrf, guestSessionId);
+            assertEquals(200, response.statusCode(), response.body());
+            JsonNode status = objectMapper.readTree(response.body());
+            if (status.get("status").asString().equals("COMPLETED")) {
+                return status;
+            }
+            if (status.get("status").asString().equals("FAILED")) {
+                throw new AssertionError("Analysis processing failed: " + response.body());
+            }
+            Thread.sleep(25);
+        } while (System.nanoTime() < deadline);
+        throw new AssertionError("The report worker did not complete before timeout.");
     }
 
     private HttpResponse<String> get(
@@ -373,6 +404,10 @@ class ReportingFullWorkflowIntegrationIT {
 
     private static String reportPath(UUID analysisId) {
         return "/api/analyses/" + analysisId + "/report";
+    }
+
+    private static String reconciliationPath(UUID analysisId) {
+        return "/api/analyses/" + analysisId + "/reconciliation";
     }
 
     private static String csvPath(UUID analysisId) {

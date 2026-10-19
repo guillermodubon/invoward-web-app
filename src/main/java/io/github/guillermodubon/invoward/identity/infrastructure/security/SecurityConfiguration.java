@@ -166,6 +166,8 @@ public class SecurityConfiguration {
                                 "/api/analyses/*/report",
                                 "/api/analyses/*/export.csv")
                         .permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/analyses/*/retry")
+                        .permitAll()
                         .anyRequest()
                         .authenticated())
                 .exceptionHandling(exceptionHandling -> exceptionHandling

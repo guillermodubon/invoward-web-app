@@ -96,7 +96,7 @@ public class ReconcileAnalysisService {
         long existingLineCount = reconciliationLineRepository.countByAnalysisId(analysisId);
         long existingDiscrepancyCount = discrepancyRepository.countByAnalysisId(analysisId);
 
-        if (analysis.status() == AnalysisStatus.GENERATING_REPORT) {
+        if (isAfterReconciliation(analysis.status())) {
             return loadExistingResult(analysis, existingLineCount, existingDiscrepancyCount);
         }
         if (analysis.status() != AnalysisStatus.RECONCILING) {
@@ -163,7 +163,7 @@ public class ReconcileAnalysisService {
         AnalysisJob job = analysisJobRepository.findByAnalysisId(analysisId)
                 .orElseThrow(ReconciliationInputNotReadyException::new);
         if (!analysisId.equals(job.analysisId())
-                || job.status() != AnalysisJobStatus.WAITING_FOR_USER
+                || job.status() != AnalysisJobStatus.RUNNING
                 || job.currentStage() != AnalysisStatus.RECONCILING) {
             throw new AnalysisReconciliationNotAllowedException();
         }
@@ -171,7 +171,7 @@ public class ReconcileAnalysisService {
 
     private ReconciliationResult completedResultAfterRace(UUID analysisId, AnalysisOwner owner) {
         Analysis latest = analysisRepository.findOwnedById(analysisId, owner, clock.instant()).orElse(null);
-        if (latest == null || latest.status() != AnalysisStatus.GENERATING_REPORT) {
+        if (latest == null || !isAfterReconciliation(latest.status())) {
             return null;
         }
         long lineCount = reconciliationLineRepository.countByAnalysisId(analysisId);
@@ -186,9 +186,7 @@ public class ReconcileAnalysisService {
         }
         AnalysisJob job = analysisJobRepository.findByAnalysisId(analysis.id())
                 .orElseThrow(ReconciliationConflictException::new);
-        if (!analysis.id().equals(job.analysisId())
-                || job.status() != AnalysisJobStatus.WAITING_FOR_USER
-                || job.currentStage() != AnalysisStatus.GENERATING_REPORT) {
+        if (!isPersistedResultState(analysis, job)) {
             throw new ReconciliationConflictException();
         }
 
@@ -207,6 +205,30 @@ public class ReconcileAnalysisService {
         }
         return ReconciliationResultAssembler.assemble(
                 analysis, matches, lines, discrepancies, duplicateInvoice, sourcePositions);
+    }
+
+    private static boolean isAfterReconciliation(AnalysisStatus status) {
+        return status == AnalysisStatus.GENERATING_REPORT
+                || status == AnalysisStatus.COMPLETED
+                || status == AnalysisStatus.FAILED;
+    }
+
+    private static boolean isPersistedResultState(Analysis analysis, AnalysisJob job) {
+        if (!analysis.id().equals(job.analysisId())) {
+            return false;
+        }
+        return switch (analysis.status()) {
+            case GENERATING_REPORT -> job.currentStage() == AnalysisStatus.GENERATING_REPORT
+                    && (job.status() == AnalysisJobStatus.QUEUED
+                    || job.status() == AnalysisJobStatus.RUNNING
+                    || job.status() == AnalysisJobStatus.FAILED
+                    || job.status() == AnalysisJobStatus.WAITING_FOR_USER);
+            case COMPLETED -> job.status() == AnalysisJobStatus.COMPLETED
+                    && job.currentStage() == AnalysisStatus.COMPLETED;
+            case FAILED -> job.status() == AnalysisJobStatus.FAILED
+                    && job.currentStage() == AnalysisStatus.GENERATING_REPORT;
+            default -> false;
+        };
     }
 
     private static boolean isCompletePersistedResult(

@@ -3,6 +3,7 @@ package io.github.guillermodubon.invoward.reconciliation.application.service;
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
@@ -26,6 +27,7 @@ import io.github.guillermodubon.invoward.reconciliation.application.port.LineIte
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchMethod;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.junit.jupiter.api.Test;
@@ -36,6 +38,7 @@ import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 import java.math.BigDecimal;
@@ -45,6 +48,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -54,6 +58,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @SpringBootTest(properties = {"invoward.email.provider=disabled", "spring.ai.model.chat=none"})
 class ConfirmLineItemMatchesServiceIT {
@@ -66,6 +74,9 @@ class ConfirmLineItemMatchesServiceIT {
 
     @MockitoSpyBean
     private AnalysisJobRepository analysisJobRepository;
+
+    @MockitoBean
+    private ProcessingWakePort processingWakePort;
 
     @Autowired
     private DocumentRepository documentRepository;
@@ -100,13 +111,32 @@ class ConfirmLineItemMatchesServiceIT {
         lineItemMatchRepository.createAll(List.of(reviewedPair, unmatchedReference));
 
         Instant before = clock.instant();
-        service.confirm(fixture.analysisId(), fixture.owner());
+        AtomicReference<String> workflowObservedAtWake = new AtomicReference<>();
+        AtomicReference<Long> reconciliationRowsAtWake = new AtomicReference<>();
+        doAnswer(invocation -> {
+            String analysisStatus = jdbcTemplate.queryForObject(
+                    "SELECT status FROM invoward.analyses WHERE id = ?", String.class, fixture.analysisId());
+            String jobState = jdbcTemplate.queryForObject(
+                    "SELECT status || '/' || current_stage FROM invoward.analysis_jobs WHERE analysis_id = ?",
+                    String.class,
+                    fixture.analysisId());
+            workflowObservedAtWake.set(analysisStatus + "/" + jobState);
+            reconciliationRowsAtWake.set(countRows("invoward.reconciliation_lines", fixture.analysisId()));
+            return null;
+        }).when(processingWakePort).wake(fixture.analysisId());
+        AnalysisStatusSnapshot response = service.confirm(fixture.analysisId(), fixture.owner());
         Instant after = clock.instant();
 
         List<LineItemMatch> confirmed = lineItemMatchRepository.findByAnalysisId(fixture.analysisId());
         LineItemMatch preserved = find(confirmed, reviewedPair.id());
         LineItemMatch stamped = find(confirmed, unmatchedReference.id());
-        assertWorkflow(fixture, AnalysisStatus.RECONCILING);
+        assertWorkflow(fixture, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED);
+        assertQueuedSnapshot(response, fixture.analysisId());
+        assertEquals("RECONCILING/QUEUED/RECONCILING", workflowObservedAtWake.get(),
+                "The processing wake-up must observe committed queued state.");
+        assertEquals(0L, reconciliationRowsAtWake.get(),
+                "Reconciliation must not run in the HTTP confirmation transaction.");
+        verify(processingWakePort).wake(fixture.analysisId());
         assertEquals(LineMatchStatus.MATCHED, preserved.status());
         assertEquals(LineMatchMethod.SKU, preserved.method());
         assertDecimalEquals(BigDecimal.ONE, preserved.confidence());
@@ -133,6 +163,7 @@ class ConfirmLineItemMatchesServiceIT {
 
         assertMatchesEqual(List.of(needsReview), lineItemMatchRepository.findByAnalysisId(fixture.analysisId()));
         assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW);
+        verify(processingWakePort, never()).wake(any());
     }
 
     @Test
@@ -147,6 +178,7 @@ class ConfirmLineItemMatchesServiceIT {
 
         assertMatchesEqual(List.of(onlyPair), lineItemMatchRepository.findByAnalysisId(fixture.analysisId()));
         assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW);
+        verify(processingWakePort, never()).wake(any());
     }
 
     @Test
@@ -161,19 +193,22 @@ class ConfirmLineItemMatchesServiceIT {
     }
 
     @Test
-    void completeSetCanBeConfirmedIdempotentlyAfterReconciliationStarted() throws Exception {
+    void completeSetQueuesReconciliationOnceWhenConfirmationIsRepeated() throws Exception {
         Fixture fixture = createFixture(1, 1, true);
         LineItemMatch completePair = match(
                 fixture, fixture.referenceLines().getFirst().id(), fixture.invoiceLines().getFirst().id(),
                 LineMatchStatus.MATCHED, LineMatchMethod.NORMALIZED_NAME, BigDecimal.ONE, null);
         lineItemMatchRepository.create(completePair);
-        moveToReconciling(fixture);
 
-        service.confirm(fixture.analysisId(), fixture.owner());
-        service.confirm(fixture.analysisId(), fixture.owner());
+        AnalysisStatusSnapshot first = service.confirm(fixture.analysisId(), fixture.owner());
+        List<LineItemMatch> firstPersistedSet = lineItemMatchRepository.findByAnalysisId(fixture.analysisId());
+        AnalysisStatusSnapshot repeated = service.confirm(fixture.analysisId(), fixture.owner());
 
-        assertWorkflow(fixture, AnalysisStatus.RECONCILING);
-        assertMatchesEqual(List.of(completePair), lineItemMatchRepository.findByAnalysisId(fixture.analysisId()));
+        assertWorkflow(fixture, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED);
+        assertQueuedSnapshot(first, fixture.analysisId());
+        assertQueuedSnapshot(repeated, fixture.analysisId());
+        assertMatchesEqual(firstPersistedSet, lineItemMatchRepository.findByAnalysisId(fixture.analysisId()));
+        verify(processingWakePort, times(1)).wake(fixture.analysisId());
     }
 
     @Test
@@ -190,6 +225,7 @@ class ConfirmLineItemMatchesServiceIT {
 
         assertMatchesEqual(List.of(pair), lineItemMatchRepository.findByAnalysisId(fixture.analysisId()));
         assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW);
+        verify(processingWakePort, never()).wake(any());
     }
 
     @Test
@@ -206,6 +242,7 @@ class ConfirmLineItemMatchesServiceIT {
 
         assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW);
         assertMatchesEqual(List.of(pair), lineItemMatchRepository.findByAnalysisId(fixture.analysisId()));
+        verify(processingWakePort, never()).wake(any());
     }
 
     private Fixture createFixture(int referenceCount, int invoiceCount, boolean awaitMatchReview) throws Exception {
@@ -302,32 +339,32 @@ class ConfirmLineItemMatchesServiceIT {
                 status, method, confidence, 0, reviewedAt, createdAt, createdAt);
     }
 
-    private void moveToReconciling(Fixture fixture) {
-        Analysis analysis = analysisRepository.findOwnedById(
-                fixture.analysisId(), fixture.owner(), clock.instant()).orElseThrow();
-        AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
-        Instant transitionAt = clock.instant();
-        if (transitionAt.isBefore(analysis.updatedAt())) {
-            transitionAt = analysis.updatedAt();
-        }
-        if (transitionAt.isBefore(job.updatedAt())) {
-            transitionAt = job.updatedAt();
-        }
-        analysisRepository.update(analysis.beginReconciliation(transitionAt));
-        analysisJobRepository.update(job.waitForReconciliation(transitionAt));
+    private void assertWorkflow(Fixture fixture, AnalysisStatus expectedStage) {
+        assertWorkflow(fixture, expectedStage, AnalysisJobStatus.WAITING_FOR_USER);
     }
 
-    private void assertWorkflow(Fixture fixture, AnalysisStatus expectedStage) {
+    private void assertWorkflow(
+            Fixture fixture, AnalysisStatus expectedStage, AnalysisJobStatus expectedJobStatus) {
         Analysis analysis = analysisRepository.findOwnedById(
                 fixture.analysisId(), fixture.owner(), clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
         assertEquals(expectedStage, analysis.status());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(expectedJobStatus, job.status());
         assertEquals(expectedStage, job.currentStage());
         assertEquals(0, job.attemptCount());
         assertFalse(job.retryable());
         assertNull(job.startedAt());
         assertNull(job.completedAt());
+    }
+
+    private static void assertQueuedSnapshot(AnalysisStatusSnapshot snapshot, UUID analysisId) {
+        assertEquals(analysisId, snapshot.analysisId());
+        assertEquals(AnalysisStatus.RECONCILING, snapshot.status());
+        assertEquals(AnalysisJobStatus.QUEUED, snapshot.jobStatus());
+        assertEquals(AnalysisStatus.RECONCILING, snapshot.currentStage());
+        assertFalse(snapshot.retryable());
+        assertNull(snapshot.failureCode());
+        assertNull(snapshot.failureMessage());
     }
 
     private long countRows(String table, UUID analysisId) {

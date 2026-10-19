@@ -42,6 +42,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -191,6 +192,40 @@ class GetReconciliationServiceTest {
         verifyNoMoreInteractions(analysisRepository, lineItemMatchRepository,
                 reconciliationLineRepository, discrepancyRepository,
                 duplicateInvoiceWarningReader, linePositionReader);
+    }
+
+    @Test
+    void readsPersistedSnapshotWhileReportIsQueuedRunningFailedOrCompleted() {
+        Analysis generated = reconciledAnalysis();
+        Analysis failed = withStatus(generated, AnalysisStatus.FAILED);
+        Analysis completed = withStatus(generated, AnalysisStatus.COMPLETED);
+        List<Analysis> lifecycleStates = List.of(generated, generated, failed, completed);
+        List<AnalysisStatus> expectedStatuses = List.of(
+                AnalysisStatus.GENERATING_REPORT,
+                AnalysisStatus.GENERATING_REPORT,
+                AnalysisStatus.FAILED,
+                AnalysisStatus.COMPLETED);
+
+        for (int index = 0; index < lifecycleStates.size(); index++) {
+            reset(analysisRepository, lineItemMatchRepository, reconciliationLineRepository, discrepancyRepository,
+                    duplicateInvoiceWarningReader, linePositionReader);
+            Analysis analysis = lifecycleStates.get(index);
+            LineItemMatch match = match(uuid(80), uuid(81), uuid(82), LineMatchStatus.MATCHED);
+            ReconciliationLine line = line(uuid(83), match.id(), ReconciliationLineStatus.MATCHED, NOW);
+            when(analysisRepository.findOwnedById(ANALYSIS_ID, OWNER, NOW)).thenReturn(Optional.of(analysis));
+            when(reconciliationLineRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(1L);
+            when(discrepancyRepository.countByAnalysisId(ANALYSIS_ID)).thenReturn(0L);
+            when(lineItemMatchRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of(match));
+            when(reconciliationLineRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of(line));
+            when(discrepancyRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of());
+            when(linePositionReader.read(analysis)).thenReturn(Map.of(uuid(81), 0, uuid(82), 0));
+            when(duplicateInvoiceWarningReader.read(analysis)).thenReturn(DuplicateInvoiceWarning.none());
+
+            ReconciliationResult result = service.get(ANALYSIS_ID, OWNER);
+
+            assertEquals(expectedStatuses.get(index), result.analysisStatus());
+            assertEquals(List.of(line), result.lines());
+        }
     }
 
     @Test

@@ -37,11 +37,16 @@ import io.github.guillermodubon.invoward.reconciliation.domain.ReconciliationLin
 import io.github.guillermodubon.invoward.reconciliation.domain.ReconciliationLineStatus;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
@@ -52,6 +57,8 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -68,6 +75,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doAnswer;
 
 @SpringBootTest(properties = {"invoward.email.provider=disabled", "spring.ai.model.chat=none"})
+@Import(PersistReconciliationTransactionIT.ProcessingTestConfiguration.class)
 class PersistReconciliationTransactionIT {
 
     @Autowired
@@ -121,6 +129,9 @@ class PersistReconciliationTransactionIT {
     @Autowired
     private Clock clock;
 
+    @Autowired
+    private ProcessingWakeProbe processingWakeProbe;
+
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
         PostgresTestContainer.configure(registry);
@@ -139,6 +150,7 @@ class PersistReconciliationTransactionIT {
         assertEquals(1, result.lines().size());
         assertTrue(result.discrepancies().isEmpty());
         assertWorkflow(fixture.analysisId(), AnalysisStatus.GENERATING_REPORT);
+        assertWakeObservedAfterCommit(fixture.analysisId());
         assertEquals(1, reconciliationLineRepository.countByAnalysisId(fixture.analysisId()));
         assertEquals(0, discrepancyRepository.countByAnalysisId(fixture.analysisId()));
     }
@@ -156,6 +168,7 @@ class PersistReconciliationTransactionIT {
         assertEquals(1, result.discrepancies().size());
         assertEquals(2, evidenceRepository.findByDiscrepancyId(result.discrepancies().getFirst().id()).size());
         assertWorkflow(fixture.analysisId(), AnalysisStatus.GENERATING_REPORT);
+        assertWakeObservedAfterCommit(fixture.analysisId());
     }
 
     @Test
@@ -182,6 +195,7 @@ class PersistReconciliationTransactionIT {
         assertEquals(jobAfterFirst.updatedAt(), jobAfterSecond.updatedAt());
         assertEquals(AnalysisStatus.GENERATING_REPORT, second.analysisStatus());
         assertEquals(AnalysisReconciliationStatus.MATCHED, second.reconciliationStatus());
+        assertWakeObservedAfterCommit(fixture.analysisId());
     }
 
     @Test
@@ -296,6 +310,7 @@ class PersistReconciliationTransactionIT {
                     secondResult.analysis().reconciliationStatus());
             assertEquals(1, reconciliationLineRepository.countByAnalysisId(fixture.analysisId()));
             assertWorkflow(fixture.analysisId(), AnalysisStatus.GENERATING_REPORT);
+            assertWakeObservedAfterCommit(fixture.analysisId());
         } finally {
             startCallers.countDown();
             executor.shutdownNow();
@@ -340,7 +355,8 @@ class PersistReconciliationTransactionIT {
         job = analysisJobRepository.update(job.waitForMatching(matchingAt));
         Instant reconciliationAt = start.plusSeconds(5);
         analysis = analysisRepository.update(analysis.beginReconciliation(reconciliationAt));
-        analysisJobRepository.update(job.waitForReconciliation(reconciliationAt));
+        job = analysisJobRepository.update(job.queueReconciliation(reconciliationAt));
+        analysisJobRepository.update(job.startQueuedAttempt(reconciliationAt.plusSeconds(1), 3));
 
         DatabaseFixtures.LinePair pair = jdbcTemplate.execute(
                 (ConnectionCallback<DatabaseFixtures.LinePair>) connection ->
@@ -443,10 +459,17 @@ class PersistReconciliationTransactionIT {
         Analysis analysis = analysisRepository.findOwnedById(analysisId, owner, clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(analysisId).orElseThrow();
         assertEquals(expectedStage, analysis.status());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        AnalysisJobStatus expectedJobStatus = expectedStage == AnalysisStatus.GENERATING_REPORT
+                ? AnalysisJobStatus.QUEUED : AnalysisJobStatus.RUNNING;
+        assertEquals(expectedJobStatus, job.status());
         assertEquals(expectedStage, job.currentStage());
         assertFalse(job.retryable());
-        assertEquals(0, job.attemptCount());
+        assertEquals(expectedStage == AnalysisStatus.GENERATING_REPORT ? 0 : 1, job.attemptCount());
+        assertEquals(expectedJobStatus == AnalysisJobStatus.RUNNING, job.startedAt() != null);
+    }
+
+    private void assertWakeObservedAfterCommit(UUID analysisId) {
+        assertEquals(List.of("QUEUED/GENERATING_REPORT/0"), processingWakeProbe.statesFor(analysisId));
     }
 
     private AnalysisOwner fixtureOwner(UUID analysisId) {
@@ -493,5 +516,44 @@ class PersistReconciliationTransactionIT {
             ReconciliationInput input,
             ReconciliationPlan plan,
             AnalysisReconciliationStatus resultStatus) {
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class ProcessingTestConfiguration {
+
+        @Bean
+        ProcessingWakeProbe processingWakeProbe(JdbcTemplate jdbcTemplate) {
+            return new ProcessingWakeProbe(jdbcTemplate);
+        }
+
+        @Bean
+        @Primary
+        ProcessingWakePort processingWakePort(ProcessingWakeProbe probe) {
+            return probe;
+        }
+    }
+
+    static final class ProcessingWakeProbe implements ProcessingWakePort {
+
+        private final JdbcTemplate jdbcTemplate;
+        private final Map<UUID, List<String>> observedStates = new ConcurrentHashMap<>();
+
+        ProcessingWakeProbe(JdbcTemplate jdbcTemplate) {
+            this.jdbcTemplate = jdbcTemplate;
+        }
+
+        @Override
+        public void wake(UUID analysisId) {
+            String state = jdbcTemplate.queryForObject(
+                    "SELECT status::text || '/' || current_stage::text || '/' || attempt_count::text "
+                            + "FROM invoward.analysis_jobs WHERE analysis_id = ?",
+                    String.class,
+                    analysisId);
+            observedStates.computeIfAbsent(analysisId, ignored -> new CopyOnWriteArrayList<>()).add(state);
+        }
+
+        List<String> statesFor(UUID analysisId) {
+            return List.copyOf(observedStates.getOrDefault(analysisId, List.of()));
+        }
     }
 }

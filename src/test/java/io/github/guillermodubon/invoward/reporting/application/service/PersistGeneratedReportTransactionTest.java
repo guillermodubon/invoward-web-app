@@ -180,6 +180,26 @@ class PersistGeneratedReportTransactionTest {
     }
 
     @Test
+    void rejectsWaitingReportJobWithoutWriting() {
+        Analysis analysis = reportReadyAnalysis(new RegisteredUserOwner(UUID.randomUUID()), NOW.minusSeconds(10));
+        AnalysisJob waiting = new AnalysisJob(
+                UUID.randomUUID(), analysis.id(), AnalysisJobStatus.WAITING_FOR_USER,
+                AnalysisStatus.GENERATING_REPORT, 0, false, null, null, null, null,
+                analysis.createdAt(), analysis.updatedAt());
+        when(analysisRepository.findOwnedByIdForUpdate(analysis.id(), analysis.owner(), NOW))
+                .thenReturn(Optional.of(analysis));
+        when(generatedReportRepository.findByAnalysisId(analysis.id())).thenReturn(Optional.empty());
+        when(analysisJobRepository.findJobByAnalysisIdForUpdate(analysis.id())).thenReturn(Optional.of(waiting));
+
+        assertThrows(ReportConflictException.class,
+                () -> transaction.persist(analysis.owner(), report(analysis.id(), null, NOW)));
+
+        verify(generatedReportRepository, never()).create(any());
+        verify(analysisRepository, never()).update(any());
+        verify(analysisJobRepository, never()).update(any());
+    }
+
+    @Test
     void rejectsGeneratedAtEarlierThanLockedWorkflowTimestamps() {
         Analysis analysis = reportReadyAnalysis(new RegisteredUserOwner(UUID.randomUUID()), NOW.minusSeconds(10));
         AnalysisJob job = reportReadyJob(analysis.id(), NOW.minusSeconds(10));
@@ -215,7 +235,8 @@ class PersistGeneratedReportTransactionTest {
                 .waitForExtractionConfirmation(start.plusSeconds(3))
                 .waitForMatching(start.plusSeconds(4))
                 .waitForReconciliation(start.plusSeconds(5))
-                .awaitReportGeneration(start.plusSeconds(6));
+                .queueReportGeneration(start.plusSeconds(6))
+                .startQueuedAttempt(start.plusSeconds(7), 3);
     }
 
     private static GeneratedReport report(UUID analysisId, Instant expiresAt, Instant generatedAt) {

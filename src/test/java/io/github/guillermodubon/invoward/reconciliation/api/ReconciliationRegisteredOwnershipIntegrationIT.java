@@ -19,7 +19,6 @@ import io.github.guillermodubon.invoward.extraction.domain.ExtractionSource;
 import io.github.guillermodubon.invoward.identity.application.model.GuestSession;
 import io.github.guillermodubon.invoward.identity.application.service.GuestSessionService;
 import io.github.guillermodubon.invoward.reconciliation.application.port.LineItemMatchRepository;
-import io.github.guillermodubon.invoward.reconciliation.application.service.ConfirmLineItemMatchesService;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchMethod;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
@@ -67,6 +66,7 @@ class ReconciliationRegisteredOwnershipIntegrationIT {
     private static final String RAW_PASSWORD = "reconciliation ownership integration passphrase";
     private static final String ANALYSIS_NOT_FOUND =
             "{\"code\":\"ANALYSIS_NOT_FOUND\",\"message\":\"Analysis was not found.\"}";
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NEVER)
@@ -104,9 +104,6 @@ class ReconciliationRegisteredOwnershipIntegrationIT {
     private LineItemMatchRepository lineItemMatchRepository;
 
     @Autowired
-    private ConfirmLineItemMatchesService confirmLineItemMatchesService;
-
-    @Autowired
     private GuestSessionService guestSessionService;
 
     @DynamicPropertySource
@@ -136,16 +133,23 @@ class ReconciliationRegisteredOwnershipIntegrationIT {
 
         HttpResponse<String> postResult = postWithoutBody(
                 baseUri, reconcilePath(ownerFixture.analysisId()), sessionA, null);
-        assertEquals(200, postResult.statusCode());
+        assertEquals(202, postResult.statusCode(), postResult.body());
         assertEquals("application/json", mediaType(postResult));
-        JsonNode postBody = objectMapper.readTree(postResult.body());
-        assertEquals(ownerFixture.analysisId().toString(), postBody.get("analysisId").asString());
+        assertEquals("/api/analyses/" + ownerFixture.analysisId() + "/status",
+                postResult.headers().firstValue("Location").orElseThrow());
+        JsonNode commandStatus = objectMapper.readTree(postResult.body());
+        assertEquals(ownerFixture.analysisId().toString(), commandStatus.get("analysisId").asString());
+        assertEquals("RECONCILING", commandStatus.get("status").asString());
+        assertTrue(List.of("QUEUED", "RUNNING").contains(commandStatus.get("jobStatus").asString()));
+
+        JsonNode postBody = awaitReconciliation(
+                baseUri, ownerFixture.analysisId(), sessionA.cookie(), null);
         assertEquals("GENERATING_REPORT", postBody.get("analysisStatus").asString());
         assertEquals("REVIEW_REQUIRED", postBody.get("reconciliationStatus").asString());
         assertFalse(postBody.get("duplicateInvoice").get("possibleDuplicate").asBoolean());
         assertTrue(postBody.get("duplicateInvoice").get("candidates").isEmpty(),
                 "A duplicate candidate belonging to another user must not be disclosed.");
-        assertFalse(postResult.body().contains(otherUsersDuplicateCandidate.toString()));
+        assertFalse(objectMapper.writeValueAsString(postBody).contains(otherUsersDuplicateCandidate.toString()));
 
         JsonNode unitPriceDiscrepancy = findDiscrepancy(postBody, "UNIT_PRICE_MISMATCH");
         UUID discrepancyId = UUID.fromString(unitPriceDiscrepancy.get("id").asString());
@@ -277,7 +281,9 @@ class ReconciliationRegisteredOwnershipIntegrationIT {
                 UUID.randomUUID(), analysisId, referenceLineId, invoiceLineId,
                 LineMatchStatus.MATCHED, LineMatchMethod.SKU, BigDecimal.ONE,
                 0, matchCreatedAt, matchCreatedAt, matchCreatedAt));
-        confirmLineItemMatchesService.confirm(analysisId, owner);
+        Instant reconciliationAt = start.plusSeconds(10);
+        analysisRepository.update(analysis.beginReconciliation(reconciliationAt));
+        analysisJobRepository.update(job.waitForReconciliation(reconciliationAt));
 
         return new ReconciliationFixture(analysisId, invoiceNumber, analysis.supplierKey());
     }
@@ -374,6 +380,25 @@ class ReconciliationRegisteredOwnershipIntegrationIT {
             URI baseUri, String path, String sessionCookie, UUID guestSessionId) throws Exception {
         return httpClient.send(request(baseUri, path, sessionCookie, guestSessionId).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
+    }
+
+    private JsonNode awaitReconciliation(
+            URI baseUri, UUID analysisId, String sessionCookie, UUID guestSessionId) throws Exception {
+        long deadline = System.nanoTime() + REQUEST_TIMEOUT.toNanos();
+        do {
+            HttpResponse<String> statusResponse = get(
+                    baseUri, "/api/analyses/" + analysisId + "/status", sessionCookie, guestSessionId);
+            assertEquals(200, statusResponse.statusCode(), statusResponse.body());
+            if (objectMapper.readTree(statusResponse.body()).get("status").asString().equals("RECONCILING")) {
+                Thread.sleep(25);
+                continue;
+            }
+            HttpResponse<String> response = get(
+                    baseUri, reconciliationPath(analysisId), sessionCookie, guestSessionId);
+            assertEquals(200, response.statusCode(), response.body());
+            return objectMapper.readTree(response.body());
+        } while (System.nanoTime() < deadline);
+        throw new AssertionError("Persisted reconciliation did not become available before timeout.");
     }
 
     private HttpResponse<String> postJson(

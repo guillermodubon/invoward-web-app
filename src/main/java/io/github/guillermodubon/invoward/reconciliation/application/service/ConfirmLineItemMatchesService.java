@@ -1,6 +1,8 @@
 package io.github.guillermodubon.invoward.reconciliation.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
@@ -47,6 +49,7 @@ public class ConfirmLineItemMatchesService {
     private final DocumentRepository documentRepository;
     private final ExtractedDocumentRepository extractedDocumentRepository;
     private final LineItemMatchRepository lineItemMatchRepository;
+    private final AnalysisProcessingSignalPublisher signalPublisher;
     private final Clock clock;
 
     public ConfirmLineItemMatchesService(
@@ -55,17 +58,19 @@ public class ConfirmLineItemMatchesService {
             DocumentRepository documentRepository,
             ExtractedDocumentRepository extractedDocumentRepository,
             LineItemMatchRepository lineItemMatchRepository,
+            AnalysisProcessingSignalPublisher signalPublisher,
             Clock clock) {
         this.analysisRepository = Objects.requireNonNull(analysisRepository);
         this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
         this.documentRepository = Objects.requireNonNull(documentRepository);
         this.extractedDocumentRepository = Objects.requireNonNull(extractedDocumentRepository);
         this.lineItemMatchRepository = Objects.requireNonNull(lineItemMatchRepository);
+        this.signalPublisher = Objects.requireNonNull(signalPublisher);
         this.clock = Objects.requireNonNull(clock);
     }
 
     @Transactional
-    public void confirm(UUID analysisId, AnalysisOwner owner) {
+    public AnalysisStatusSnapshot confirm(UUID analysisId, AnalysisOwner owner) {
         Objects.requireNonNull(analysisId, "analysisId must not be null");
         Objects.requireNonNull(owner, "owner must not be null");
 
@@ -81,23 +86,28 @@ public class ConfirmLineItemMatchesService {
             throw new AnalysisMatchingNotAllowedException();
         }
 
-        AnalysisStatus requiredJobStage = alreadyReconciling
-                ? AnalysisStatus.RECONCILING
-                : AnalysisStatus.AWAITING_MATCH_REVIEW;
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysisId)
-                .filter(current -> current.analysisId().equals(analysisId)
-                        && current.status() == AnalysisJobStatus.WAITING_FOR_USER
-                        && current.currentStage() == requiredJobStage)
+                .filter(current -> current.analysisId().equals(analysisId))
                 .orElseThrow(AnalysisMatchingNotAllowedException::new);
+
+        if (isReconciliationAlreadyQueued(analysis, job)) {
+            return snapshot(analysis, job);
+        }
+        if (alreadyReconciling) {
+            if (job.status() != AnalysisJobStatus.WAITING_FOR_USER
+                    || job.currentStage() != AnalysisStatus.RECONCILING) {
+                throw new AnalysisMatchingNotAllowedException();
+            }
+        } else if (analysis.status() != AnalysisStatus.AWAITING_MATCH_REVIEW
+                || job.status() != AnalysisJobStatus.WAITING_FOR_USER
+                || job.currentStage() != AnalysisStatus.AWAITING_MATCH_REVIEW) {
+            throw new AnalysisMatchingNotAllowedException();
+        }
 
         List<LineItemMatch> matches = lineItemMatchRepository.findByAnalysisIdForUpdate(analysisId);
         ConfirmedInput input = readConfirmedInput(analysis, now);
         requireCompleteCover(analysisId, input, matches);
         requireNoPendingReview(matches);
-        if (alreadyReconciling) {
-            return;
-        }
-
         Instant transitionAt = latest(now, analysis.updatedAt(), job.updatedAt(), matches);
         stampUnreviewedMatches(matches, transitionAt);
 
@@ -105,8 +115,33 @@ public class ConfirmLineItemMatchesService {
         requireCompleteCover(analysisId, input, confirmedMatches);
         requireNoPendingReview(confirmedMatches);
 
-        analysisRepository.update(analysis.beginReconciliation(transitionAt));
-        analysisJobRepository.update(job.waitForReconciliation(transitionAt));
+        Analysis updatedAnalysis = alreadyReconciling
+                ? analysis
+                : analysisRepository.update(analysis.beginReconciliation(transitionAt));
+        AnalysisJob queuedJob = alreadyReconciling
+                ? job.queueLegacyMachineStage(transitionAt)
+                : job.queueReconciliation(transitionAt);
+        queuedJob = analysisJobRepository.update(queuedJob);
+        signalPublisher.request(analysisId);
+        return snapshot(updatedAnalysis, queuedJob);
+    }
+
+    private static boolean isReconciliationAlreadyQueued(Analysis analysis, AnalysisJob job) {
+        return analysis.status() == AnalysisStatus.RECONCILING
+                && job.currentStage() == AnalysisStatus.RECONCILING
+                && (job.status() == AnalysisJobStatus.QUEUED || job.status() == AnalysisJobStatus.RUNNING);
+    }
+
+    private static AnalysisStatusSnapshot snapshot(Analysis analysis, AnalysisJob job) {
+        return new AnalysisStatusSnapshot(
+                analysis.id(),
+                analysis.status(),
+                job.status(),
+                job.currentStage(),
+                analysis.retryable(),
+                analysis.failureCode(),
+                analysis.failureUserMessage(),
+                analysis.updatedAt());
     }
 
     private void stampUnreviewedMatches(List<LineItemMatch> matches, Instant reviewedAt) {

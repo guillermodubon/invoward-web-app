@@ -2,6 +2,7 @@ package io.github.guillermodubon.invoward.reconciliation.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
@@ -50,6 +51,7 @@ public class PersistReconciliationTransaction {
     private final ReconciliationLineRepository reconciliationLineRepository;
     private final DiscrepancyRepository discrepancyRepository;
     private final DiscrepancyEvidenceRepository discrepancyEvidenceRepository;
+    private final AnalysisProcessingSignalPublisher processingSignalPublisher;
     private final Clock clock;
 
     public PersistReconciliationTransaction(
@@ -59,6 +61,7 @@ public class PersistReconciliationTransaction {
             ReconciliationLineRepository reconciliationLineRepository,
             DiscrepancyRepository discrepancyRepository,
             DiscrepancyEvidenceRepository discrepancyEvidenceRepository,
+            AnalysisProcessingSignalPublisher processingSignalPublisher,
             Clock clock) {
         this.analysisRepository = Objects.requireNonNull(analysisRepository);
         this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
@@ -66,6 +69,7 @@ public class PersistReconciliationTransaction {
         this.reconciliationLineRepository = Objects.requireNonNull(reconciliationLineRepository);
         this.discrepancyRepository = Objects.requireNonNull(discrepancyRepository);
         this.discrepancyEvidenceRepository = Objects.requireNonNull(discrepancyEvidenceRepository);
+        this.processingSignalPublisher = Objects.requireNonNull(processingSignalPublisher);
         this.clock = Objects.requireNonNull(clock);
     }
 
@@ -112,13 +116,13 @@ public class PersistReconciliationTransaction {
         long existingLineCount = reconciliationLineRepository.countByAnalysisId(analysisId);
         long existingDiscrepancyCount = discrepancyRepository.countByAnalysisId(analysisId);
 
-        if (analysis.status() == AnalysisStatus.GENERATING_REPORT) {
+        if (isAfterReconciliation(analysis.status())) {
             return existingWinner(analysis, job, lockedMatches, existingLineCount, existingDiscrepancyCount);
         }
         if (analysis.status() != AnalysisStatus.RECONCILING) {
             throw new AnalysisReconciliationNotAllowedException();
         }
-        if (job.status() != AnalysisJobStatus.WAITING_FOR_USER
+        if (job.status() != AnalysisJobStatus.RUNNING
                 || job.currentStage() != AnalysisStatus.RECONCILING) {
             throw new AnalysisReconciliationNotAllowedException();
         }
@@ -137,7 +141,8 @@ public class PersistReconciliationTransaction {
 
         Analysis updatedAnalysis = analysisRepository.update(
                 analysis.completeReconciliation(reconciliationStatus, plan.analysisDifference(), transitionAt));
-        analysisJobRepository.update(job.awaitReportGeneration(transitionAt));
+        analysisJobRepository.update(job.queueReportGeneration(transitionAt));
+        processingSignalPublisher.request(analysisId);
         return new ReconciliationPersistenceResult(true, updatedAnalysis, lines, discrepancies);
     }
 
@@ -147,8 +152,7 @@ public class PersistReconciliationTransaction {
             List<LineItemMatch> matches,
             long existingLineCount,
             long existingDiscrepancyCount) {
-        if (job.status() != AnalysisJobStatus.WAITING_FOR_USER
-                || job.currentStage() != AnalysisStatus.GENERATING_REPORT
+        if (!isPersistedResultState(analysis, job)
                 || analysis.reconciliationStatus() == null
                 || existingLineCount != matches.size()
                 || existingLineCount == 0) {
@@ -161,6 +165,30 @@ public class PersistReconciliationTransaction {
             throw new ReconciliationConflictException();
         }
         return new ReconciliationPersistenceResult(false, analysis, lines, discrepancies);
+    }
+
+    private static boolean isAfterReconciliation(AnalysisStatus status) {
+        return status == AnalysisStatus.GENERATING_REPORT
+                || status == AnalysisStatus.COMPLETED
+                || status == AnalysisStatus.FAILED;
+    }
+
+    private static boolean isPersistedResultState(Analysis analysis, AnalysisJob job) {
+        if (!analysis.id().equals(job.analysisId())) {
+            return false;
+        }
+        return switch (analysis.status()) {
+            case GENERATING_REPORT -> job.currentStage() == AnalysisStatus.GENERATING_REPORT
+                    && (job.status() == AnalysisJobStatus.QUEUED
+                    || job.status() == AnalysisJobStatus.RUNNING
+                    || job.status() == AnalysisJobStatus.FAILED
+                    || job.status() == AnalysisJobStatus.WAITING_FOR_USER);
+            case COMPLETED -> job.status() == AnalysisJobStatus.COMPLETED
+                    && job.currentStage() == AnalysisStatus.COMPLETED;
+            case FAILED -> job.status() == AnalysisJobStatus.FAILED
+                    && job.currentStage() == AnalysisStatus.GENERATING_REPORT;
+            default -> false;
+        };
     }
 
     private static void verifyMatchSnapshot(ReconciliationInput input, List<LineItemMatch> matches) {

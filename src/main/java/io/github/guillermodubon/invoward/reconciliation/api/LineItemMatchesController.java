@@ -1,7 +1,9 @@
 package io.github.guillermodubon.invoward.reconciliation.api;
 
 import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
+import io.github.guillermodubon.invoward.analysis.api.model.AnalysisStatusResponse;
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.identity.application.model.AuthenticatedIdentity;
 import io.github.guillermodubon.invoward.reconciliation.api.model.LineItemMatchesResponse;
@@ -11,6 +13,7 @@ import io.github.guillermodubon.invoward.reconciliation.application.service.GetL
 import io.github.guillermodubon.invoward.reconciliation.application.service.UpdateLineItemMatchService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
+import java.net.URI;
 import org.springframework.http.CacheControl;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -81,16 +84,17 @@ public class LineItemMatchesController {
     }
 
     @PostMapping(path = "/confirm")
-    public ResponseEntity<Void> confirmMatches(
+    public ResponseEntity<AnalysisStatusResponse> confirmMatches(
             @PathVariable UUID analysisId,
             @AuthenticationPrincipal AuthenticatedIdentity authenticatedIdentity,
             HttpServletRequest request) {
         AnalysisOwner owner = ownerResolver.resolveForRead(authenticatedIdentity, request)
                 .orElseThrow(AnalysisNotFoundException::new);
-        confirmLineItemMatchesService.confirm(analysisId, owner);
+        AnalysisStatusSnapshot snapshot = confirmLineItemMatchesService.confirm(analysisId, owner);
         ownerResolver.recordSuccessfulActivity(owner);
-        return ResponseEntity.noContent()
+        return ResponseEntity.accepted()
+                .location(URI.create("/api/analyses/" + analysisId + "/status"))
                 .cacheControl(CacheControl.noStore())
-                .build();
+                .body(AnalysisStatusResponse.from(snapshot));
     }
 }

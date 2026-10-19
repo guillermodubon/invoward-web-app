@@ -1,6 +1,7 @@
 package io.github.guillermodubon.invoward.reconciliation.api;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisProcessingNotAllowedException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.AnalysisReconciliationNotAllowedException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.DiscrepancyConflictException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.DiscrepancyNotFoundException;
@@ -27,6 +28,13 @@ public class ReconciliationExceptionHandler {
     public ResponseEntity<ReconciliationErrorResponse> handleAnalysisNotFound(
             AnalysisNotFoundException exception) {
         return response(HttpStatus.NOT_FOUND, "ANALYSIS_NOT_FOUND", "Analysis was not found.");
+    }
+
+    @ExceptionHandler(AnalysisProcessingNotAllowedException.class)
+    public ResponseEntity<ReconciliationErrorResponse> handleProcessingNotAllowed(
+            AnalysisProcessingNotAllowedException exception) {
+        return response(HttpStatus.CONFLICT, "ANALYSIS_PROCESSING_NOT_ALLOWED",
+                "Analysis processing is not allowed in its current state.");
     }
 
     @ExceptionHandler(DiscrepancyNotFoundException.class)
