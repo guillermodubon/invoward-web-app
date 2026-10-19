@@ -27,9 +27,11 @@ import io.github.guillermodubon.invoward.extraction.domain.ExtractedDocument;
 import io.github.guillermodubon.invoward.extraction.domain.ExtractedLineItem;
 import io.github.guillermodubon.invoward.extraction.domain.ExtractionSource;
 import io.github.guillermodubon.invoward.extraction.domain.ExtractionStatus;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -50,11 +52,13 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(properties = "spring.ai.model.chat=none")
 @Import(ConfirmExtractionServiceIT.FailureInjectionConfiguration.class)
@@ -70,6 +74,7 @@ class ConfirmExtractionServiceIT {
     @Autowired private FailureSwitch failureSwitch;
     @Autowired private JdbcTemplate jdbcTemplate;
     @Autowired private Clock clock;
+    @Autowired private WakeProbe wakeProbe;
 
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
@@ -81,11 +86,16 @@ class ConfirmExtractionServiceIT {
         failureSwitch.reset();
     }
 
+    @BeforeEach
+    void resetWakeProbe() {
+        wakeProbe.clear();
+    }
+
     @Test
-    void confirmsBothDraftsAndPersistsTheSummaryAndMatchingWaitStateAtomically() {
+    void confirmsBothDraftsAndQueuesMatchingAtomicallyBeforeAfterCommitWake() {
         Fixture fixture = createFixture();
 
-        confirmService.confirm(fixture.analysis().id(), fixture.owner(), confirmation(fixture));
+        var snapshot = confirmService.confirm(fixture.analysis().id(), fixture.owner(), confirmation(fixture));
 
         PersistedExtraction reference = extractedDocumentRepository
                 .findByDocumentId(fixture.reference().id()).orElseThrow();
@@ -115,13 +125,18 @@ class ConfirmExtractionServiceIT {
         assertEquals(new BigDecimal("132.5000"), matching.invoicedTotal());
         assertNull(matching.difference());
         assertNull(matching.reconciliationStatus());
+        assertEquals(AnalysisStatus.MATCHING, snapshot.status());
+        assertEquals(AnalysisJobStatus.QUEUED, snapshot.jobStatus());
+        assertEquals(AnalysisStatus.MATCHING, snapshot.currentStage());
 
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(AnalysisJobStatus.QUEUED, job.status());
         assertEquals(AnalysisStatus.MATCHING, job.currentStage());
         assertEquals(0, job.attemptCount());
         assertNull(job.startedAt());
         assertNull(job.completedAt());
+        assertEquals(List.of("QUEUED/MATCHING"), wakeProbe.observedStates(),
+                "the after-commit listener must observe the durable queued state");
         assertEquals(0, jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM invoward.line_item_matches WHERE analysis_id = ?",
                 Integer.class, fixture.analysis().id()));
@@ -154,19 +169,24 @@ class ConfirmExtractionServiceIT {
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
         assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
         assertEquals(AnalysisStatus.AWAITING_CONFIRMATION, job.currentStage());
+        assertTrue(wakeProbe.observedStates().isEmpty(), "rolled-back confirmation must not wake matching");
     }
 
     private Fixture createFixture() {
         Instant now = clock.instant();
         UUID userId = jdbcTemplate.execute((ConnectionCallback<UUID>) DatabaseFixtures::insertUser);
         AnalysisOwner owner = new RegisteredUserOwner(userId);
-        Analysis analysis = Analysis.create(UUID.randomUUID(), owner, PriceTolerance.exactMatch(), now)
-                .transitionToUploading(now)
-                .markClassifying(now);
+        Analysis analysis = Analysis.create(UUID.randomUUID(), owner, PriceTolerance.exactMatch(), now.minusSeconds(4))
+                .transitionToUploading(now.minusSeconds(3))
+                .markClassifying(now.minusSeconds(2))
+                .beginExtraction(now.minusSeconds(1));
         analysisRepository.create(analysis);
-        analysisJobRepository.create(AnalysisJob.waitingForUser(UUID.randomUUID(), analysis.id(), now)
-                .awaitMoreUploads(now)
-                .waitForUserAtClassification(now));
+        analysisJobRepository.create(AnalysisJob.waitingForUser(
+                        UUID.randomUUID(), analysis.id(), now.minusSeconds(4))
+                .awaitMoreUploads(now.minusSeconds(3))
+                .waitForUserAtClassification(now.minusSeconds(2))
+                .queueExtraction(now.minusSeconds(1))
+                .startQueuedAttempt(now, 3));
 
         String prefix = "confirm-extraction-test/" + UUID.randomUUID();
         Document reference = document(analysis.id(), DocumentRole.REFERENCE,
@@ -229,6 +249,17 @@ class ConfirmExtractionServiceIT {
         }
 
         @Bean
+        WakeProbe wakeProbe(JdbcTemplate jdbcTemplate) {
+            return new WakeProbe(jdbcTemplate);
+        }
+
+        @Bean
+        @Primary
+        ProcessingWakePort processingWakePort(WakeProbe wakeProbe) {
+            return wakeProbe;
+        }
+
+        @Bean
         @Primary
         ExtractedDocumentRepository failureInjectingExtractionRepository(
                 @Qualifier("jpaExtractedDocumentRepository") ExtractedDocumentRepository delegate,
@@ -261,6 +292,33 @@ class ConfirmExtractionServiceIT {
         synchronized void reset() {
             failOnConfirm = -1;
             confirmCount = 0;
+        }
+    }
+
+    static final class WakeProbe implements ProcessingWakePort {
+        private final JdbcTemplate jdbcTemplate;
+        private final List<String> observedStates = new CopyOnWriteArrayList<>();
+
+        WakeProbe(JdbcTemplate jdbcTemplate) {
+            this.jdbcTemplate = jdbcTemplate;
+        }
+
+        @Override
+        public void wake(UUID analysisId) {
+            String state = jdbcTemplate.queryForObject(
+                    "SELECT status::text || '/' || current_stage::text "
+                            + "FROM invoward.analysis_jobs WHERE analysis_id = ?",
+                    String.class,
+                    analysisId);
+            observedStates.add(state);
+        }
+
+        List<String> observedStates() {
+            return List.copyOf(observedStates);
+        }
+
+        void clear() {
+            observedStates.clear();
         }
     }
 

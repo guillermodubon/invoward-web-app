@@ -5,6 +5,7 @@ import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRe
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.document.application.port.DocumentRepository;
@@ -22,7 +23,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
-/** Atomically advances Analysis and its waiting job after both persisted suggestions exist. */
+/** Atomically completes a claimed classification attempt at the human review gate. */
 @Service
 public class CompleteDocumentClassificationTransaction {
 
@@ -52,21 +53,18 @@ public class CompleteDocumentClassificationTransaction {
         Instant now = clock.instant();
         Analysis analysis = analysisRepository.findOwnedByIdForUpdate(analysisId, owner, now)
                 .orElseThrow(AnalysisNotFoundException::new);
-        List<Document> documents = orderedRequiredDocuments(analysisId);
-
-        if (analysis.status() == AnalysisStatus.CLASSIFYING) {
-            requireAllDetected(documents);
-            return results(documents);
-        }
-        if (analysis.status() != AnalysisStatus.UPLOADING) {
+        if (analysis.status() != AnalysisStatus.CLASSIFYING) {
             throw new DocumentClassificationConflictException();
         }
-        requireAllDetected(documents);
-
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysisId)
                 .orElseThrow(DocumentClassificationConflictException::new);
-        analysisRepository.update(analysis.markClassifying(now));
-        analysisJobRepository.update(job.waitForUserAtClassification(now));
+        if (job.status() != AnalysisJobStatus.RUNNING
+                || job.currentStage() != AnalysisStatus.CLASSIFYING) {
+            throw new DocumentClassificationConflictException();
+        }
+        List<Document> documents = orderedRequiredDocuments(analysisId);
+        requireAllDetected(documents);
+        analysisJobRepository.update(job.finishClassificationAwaitingUser(now));
         return results(documents);
     }
 

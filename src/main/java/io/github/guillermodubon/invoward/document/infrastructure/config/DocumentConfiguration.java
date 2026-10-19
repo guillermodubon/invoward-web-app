@@ -1,6 +1,7 @@
 package io.github.guillermodubon.invoward.document.infrastructure.config;
 
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.application.service.GetAnalysisService;
 import io.github.guillermodubon.invoward.document.application.port.DocumentRepository;
@@ -60,16 +61,23 @@ public class DocumentConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean({AnalysisRepository.class, AnalysisJobRepository.class, DocumentRepository.class})
+    @ConditionalOnBean({
+            AnalysisRepository.class,
+            AnalysisJobRepository.class,
+            AnalysisProcessingSignalPublisher.class,
+            DocumentRepository.class
+    })
     public UploadDocumentTransaction uploadDocumentTransaction(
             AnalysisRepository analysisRepository,
             AnalysisJobRepository analysisJobRepository,
+            AnalysisProcessingSignalPublisher signalPublisher,
             DocumentRepository documentRepository,
             Clock clock,
             DocumentUploadProperties properties) {
         return new UploadDocumentTransaction(
                 analysisRepository,
                 analysisJobRepository,
+                signalPublisher,
                 documentRepository,
                 clock,
                 properties.maxCombinedSize().toBytes());

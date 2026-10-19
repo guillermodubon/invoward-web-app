@@ -123,36 +123,106 @@ public record Analysis(
                 now);
     }
 
-    /** Marks both upload slots as classified and waits for human confirmation. */
+    /** Enters the classification state after both required upload slots are present. */
     public Analysis markClassifying(Instant now) {
+        return beginClassification(now);
+    }
+
+    /** Enters the classification machine stage after all required uploads are present. */
+    public Analysis beginClassification(Instant now) {
         Objects.requireNonNull(now, "now must not be null");
         if (status != AnalysisStatus.UPLOADING) {
             throw new IllegalStateException("Analysis can be classified only after uploads");
         }
-        if (now.isBefore(updatedAt)) {
-            throw new IllegalArgumentException("now must not be before updatedAt");
-        }
+        requireTransitionTime(now);
         return new Analysis(
                 id, owner, AnalysisStatus.CLASSIFYING, reviewStatus, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
-                referenceTotal, invoicedTotal, difference, priceTolerance, retryable, failureCode,
-                failureUserMessage, version, completedAt, expiresAt, createdAt, now);
+                referenceTotal, invoicedTotal, difference, priceTolerance, false, null,
+                null, version, null, expiresAt, createdAt, now);
+    }
+
+    /** Enters extraction after the user has confirmed the detected document types. */
+    public Analysis beginExtraction(Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisStatus.CLASSIFYING) {
+            throw new IllegalStateException("Analysis can begin extraction only after classification");
+        }
+        requireTransitionTime(now);
+        return new Analysis(
+                id, owner, AnalysisStatus.EXTRACTING, reviewStatus, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance, false, null,
+                null, version, null, expiresAt, createdAt, now);
     }
 
     /** Moves a fully extracted Analysis to human review without performing reconciliation. */
     public Analysis awaitExtractionConfirmation(Instant now) {
         Objects.requireNonNull(now, "now must not be null");
-        if (status != AnalysisStatus.CLASSIFYING) {
-            throw new IllegalStateException("Analysis can await extraction confirmation only after classification");
+        if (status != AnalysisStatus.CLASSIFYING && status != AnalysisStatus.EXTRACTING) {
+            throw new IllegalStateException("Analysis can await extraction confirmation only after extraction");
         }
-        if (now.isBefore(updatedAt)) {
-            throw new IllegalArgumentException("now must not be before updatedAt");
-        }
+        requireTransitionTime(now);
         return new Analysis(
                 id, owner, AnalysisStatus.AWAITING_CONFIRMATION, reviewStatus, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, false, null, null,
                 version, null, expiresAt, createdAt, now);
+    }
+
+    /** Marks the current machine stage failed with safe, preclassified error data. */
+    public Analysis failProcessing(
+            AnalysisStatus expectedStage,
+            String safeCode,
+            String safeUserMessage,
+            boolean effectiveRetryable,
+            Instant now) {
+        Objects.requireNonNull(expectedStage, "expectedStage must not be null");
+        Objects.requireNonNull(now, "now must not be null");
+        requireMachineStage(expectedStage);
+        if (status != expectedStage) {
+            throw new IllegalStateException("Analysis is no longer at the failed machine stage");
+        }
+        requireSafeCode(safeCode, "safeCode");
+        requireSafeMessage(safeUserMessage, "safeUserMessage");
+        requireTransitionTime(now);
+        return new Analysis(
+                id, owner, AnalysisStatus.FAILED, reviewStatus, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance, effectiveRetryable,
+                safeCode, safeUserMessage, version, null, expiresAt, createdAt, now);
+    }
+
+    /** Terminalizes a persisted Analysis/AnalysisJob mismatch discovered during startup recovery. */
+    public Analysis failProcessingStateConflict(
+            String safeCode,
+            String safeUserMessage,
+            Instant now) {
+        Objects.requireNonNull(now, "now must not be null");
+        requireSafeCode(safeCode, "safeCode");
+        requireSafeMessage(safeUserMessage, "safeUserMessage");
+        requireTransitionTime(now);
+        return new Analysis(
+                id, owner, AnalysisStatus.FAILED, reviewStatus, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance, false,
+                safeCode, safeUserMessage, version, null, expiresAt, createdAt, now);
+    }
+
+    /** Retries the failed machine stage selected by the persisted AnalysisJob. */
+    public Analysis retryProcessing(AnalysisStatus failedStage, Instant now) {
+        Objects.requireNonNull(failedStage, "failedStage must not be null");
+        Objects.requireNonNull(now, "now must not be null");
+        if (status != AnalysisStatus.FAILED || !retryable) {
+            throw new IllegalStateException("Analysis can be retried only after a processing failure");
+        }
+        requireMachineStage(failedStage);
+        requireTransitionTime(now);
+        return new Analysis(
+                id, owner, failedStage, reviewStatus, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance, false,
+                null, null, version, null, expiresAt, createdAt, now);
     }
 
     /** Copies the human-confirmed extraction summary and advances the workflow to matching. */
@@ -257,6 +327,29 @@ public record Analysis(
     private void requireTransitionTime(Instant now) {
         if (now.isBefore(updatedAt)) {
             throw new IllegalArgumentException("now must not be before updatedAt");
+        }
+    }
+
+    private static void requireMachineStage(AnalysisStatus stage) {
+        if (stage != AnalysisStatus.CLASSIFYING
+                && stage != AnalysisStatus.EXTRACTING
+                && stage != AnalysisStatus.MATCHING
+                && stage != AnalysisStatus.RECONCILING
+                && stage != AnalysisStatus.GENERATING_REPORT) {
+            throw new IllegalStateException("Analysis transition requires a machine stage");
+        }
+    }
+
+    private static void requireSafeCode(String value, String fieldName) {
+        if (value == null || !value.matches("[A-Z][A-Z0-9_]{0,79}")) {
+            throw new IllegalArgumentException(fieldName + " must be a safe uppercase code");
+        }
+    }
+
+    private static void requireSafeMessage(String value, String fieldName) {
+        if (value == null || value.isBlank() || value.length() > 500
+                || value.chars().anyMatch(Character::isISOControl)) {
+            throw new IllegalArgumentException(fieldName + " must be a safe non-empty message");
         }
     }
 

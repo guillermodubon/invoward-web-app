@@ -2,7 +2,9 @@ package io.github.guillermodubon.invoward.reconciliation.api;
 
 import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.analysis.domain.GuestSessionOwner;
 import io.github.guillermodubon.invoward.analysis.domain.RegisteredUserOwner;
@@ -383,12 +385,19 @@ class LineItemMatchesControllerTest {
     }
 
     @Test
-    void confirmReturnsNoContentAndRecordsGuestActivityOnlyAfterServiceSuccess() throws Exception {
+    void confirmReturnsAcceptedStatusAndLocationAndRecordsGuestActivityOnlyAfterServiceSuccess() throws Exception {
+        when(confirmService.confirm(ANALYSIS_ID, guestOwner)).thenReturn(queuedReconciliationStatus());
+
         mockMvc.perform(post("/api/analyses/{analysisId}/matches/confirm", ANALYSIS_ID)
                         .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
-                .andExpect(status().isNoContent())
-                .andExpect(content().string(""))
-                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"));
+                .andExpect(status().isAccepted())
+                .andExpect(header().string(HttpHeaders.LOCATION,
+                        "/api/analyses/" + ANALYSIS_ID + "/status"))
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.analysisId").value(ANALYSIS_ID.toString()))
+                .andExpect(jsonPath("$.status").value("RECONCILING"))
+                .andExpect(jsonPath("$.jobStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.currentStage").value("RECONCILING"));
 
         var inOrder = inOrder(ownerResolver, confirmService);
         inOrder.verify(ownerResolver).resolveForRead(isNull(), any(HttpServletRequest.class));
@@ -402,11 +411,12 @@ class LineItemMatchesControllerTest {
         RegisteredUserOwner registeredOwner = new RegisteredUserOwner(USER_ID);
         when(ownerResolver.resolveForRead(eq(identity), any(HttpServletRequest.class)))
                 .thenReturn(Optional.of(registeredOwner));
+        when(confirmService.confirm(ANALYSIS_ID, registeredOwner)).thenReturn(queuedReconciliationStatus());
         authenticate(identity);
 
         mockMvc.perform(post("/api/analyses/{analysisId}/matches/confirm", ANALYSIS_ID)
                         .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
-                .andExpect(status().isNoContent());
+                .andExpect(status().isAccepted());
 
         verify(ownerResolver).resolveForRead(eq(identity), any(HttpServletRequest.class));
         verify(confirmService).confirm(ANALYSIS_ID, registeredOwner);
@@ -465,6 +475,18 @@ class LineItemMatchesControllerTest {
                                 null,
                                 null,
                                 line(INVOICE_ONLY_LINE_ID, 1, "Other"))));
+    }
+
+    private static AnalysisStatusSnapshot queuedReconciliationStatus() {
+        return new AnalysisStatusSnapshot(
+                ANALYSIS_ID,
+                AnalysisStatus.RECONCILING,
+                AnalysisJobStatus.QUEUED,
+                AnalysisStatus.RECONCILING,
+                false,
+                null,
+                null,
+                Instant.parse("2026-10-08T12:00:00Z"));
     }
 
     private static LineItemMatchSetView.LineItem line(UUID id, int position, String description) {

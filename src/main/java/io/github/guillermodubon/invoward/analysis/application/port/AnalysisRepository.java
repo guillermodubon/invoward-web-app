@@ -16,5 +16,11 @@ public interface AnalysisRepository {
 
     Optional<Analysis> findOwnedByIdForUpdate(UUID analysisId, AnalysisOwner owner, Instant now);
 
+    /** Internal worker lookup; never use this method for HTTP authorization. */
+    Optional<Analysis> findByIdForProcessing(UUID analysisId);
+
+    /** Internal worker lookup that locks the Analysis row; never use for HTTP authorization. */
+    Optional<Analysis> findByIdForProcessingForUpdate(UUID analysisId);
+
     Analysis update(Analysis analysis);
 }

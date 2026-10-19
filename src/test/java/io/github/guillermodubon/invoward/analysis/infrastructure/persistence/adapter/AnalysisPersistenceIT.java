@@ -25,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -157,6 +158,73 @@ class AnalysisPersistenceIT {
     }
 
     @Test
+    void exposesInternalProcessingLookupsWithoutChangingOwnerScopedReads() throws Exception {
+        RegisteredUserOwner owner = new RegisteredUserOwner(insertUser());
+        Analysis analysis = analysisRepository.create(Analysis.create(
+                UUID.randomUUID(), owner, PriceTolerance.exactMatch(), NOW));
+
+        assertEquals(analysis, analysisRepository.findByIdForProcessing(analysis.id()).orElseThrow());
+        assertEquals(analysis, analysisRepository.findByIdForProcessingForUpdate(analysis.id()).orElseThrow());
+        assertTrue(analysisRepository.findOwnedById(
+                analysis.id(), new RegisteredUserOwner(UUID.randomUUID()), NOW).isEmpty());
+
+        Analysis updated = analysisRepository.update(
+                analysisRepository.findByIdForProcessingForUpdate(analysis.id()).orElseThrow()
+                        .transitionToUploading(NOW.plusSeconds(1)));
+
+        assertEquals(AnalysisStatus.UPLOADING, updated.status());
+        assertEquals(1, updated.version());
+        assertEquals(updated, analysisRepository.findByIdForProcessing(analysis.id()).orElseThrow());
+    }
+
+    @Test
+    void internalProcessingLookupCanFindExpiredGuestWhileOwnerScopedReadStillHidesIt() throws Exception {
+        UUID guestSessionId = insertGuestSession();
+        Instant expiresAt = NOW.plusSeconds(10);
+        GuestSessionOwner owner = new GuestSessionOwner(guestSessionId, expiresAt);
+        Analysis analysis = analysisRepository.create(Analysis.create(
+                UUID.randomUUID(), owner, PriceTolerance.exactMatch(), NOW));
+        Instant afterExpiry = expiresAt.plusNanos(1);
+
+        assertTrue(analysisRepository.findOwnedById(analysis.id(), owner, afterExpiry).isEmpty());
+        assertTrue(analysisRepository.findOwnedByIdForUpdate(analysis.id(), owner, afterExpiry).isEmpty());
+        assertEquals(analysis, analysisRepository.findByIdForProcessing(analysis.id()).orElseThrow());
+        assertEquals(analysis, analysisRepository.findByIdForProcessingForUpdate(analysis.id()).orElseThrow());
+    }
+
+    @Test
+    void scansJobStatusesWithBoundedStableOldestFirstOrdering() throws Exception {
+        // This global scan needs an isolated dataset; @Transactional rolls this deletion back.
+        jdbcTemplate.update("DELETE FROM invoward.analysis_jobs");
+        UUID userId = insertUser();
+        UUID firstId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID secondId = UUID.fromString("00000000-0000-0000-0000-000000000002");
+        UUID laterId = UUID.fromString("00000000-0000-0000-0000-000000000003");
+        UUID runningId = UUID.fromString("00000000-0000-0000-0000-000000000004");
+        UUID waitingId = UUID.fromString("00000000-0000-0000-0000-000000000005");
+
+        persistAnalysisWithJob(userId, firstId,
+                queuedJob(firstId, NOW.plusSeconds(10)));
+        persistAnalysisWithJob(userId, secondId,
+                queuedJob(secondId, NOW.plusSeconds(10)));
+        persistAnalysisWithJob(userId, laterId,
+                queuedJob(laterId, NOW.plusSeconds(20)));
+        persistAnalysisWithJob(userId, runningId,
+                queuedJob(runningId, NOW.plusSeconds(10)).startQueuedAttempt(NOW.plusSeconds(11), 3));
+        persistAnalysisWithJob(userId, waitingId,
+                AnalysisJob.waitingForUser(UUID.randomUUID(), waitingId, NOW));
+
+        assertEquals(List.of(firstId, secondId, laterId),
+                analysisJobRepository.findAnalysisIdsByStatus(AnalysisJobStatus.QUEUED, 10));
+        assertEquals(List.of(firstId, secondId),
+                analysisJobRepository.findAnalysisIdsByStatus(AnalysisJobStatus.QUEUED, 2));
+        assertEquals(List.of(runningId),
+                analysisJobRepository.findAnalysisIdsByStatus(AnalysisJobStatus.RUNNING, 10));
+        assertEquals(List.of(waitingId),
+                analysisJobRepository.findAnalysisIdsByStatus(AnalysisJobStatus.WAITING_FOR_USER, 10));
+    }
+
+    @Test
     void rejectsASecondJobForTheSameAnalysis() throws Exception {
         UUID userId = insertUser();
         Analysis analysis = analysisRepository.create(Analysis.create(
@@ -206,6 +274,18 @@ class AnalysisPersistenceIT {
 
     private UUID insertUser() throws Exception {
         return jdbcTemplate.execute((ConnectionCallback<UUID>) DatabaseFixtures::insertUser);
+    }
+
+    private void persistAnalysisWithJob(UUID userId, UUID analysisId, AnalysisJob job) {
+        analysisRepository.create(Analysis.create(
+                analysisId, new RegisteredUserOwner(userId), PriceTolerance.exactMatch(), NOW));
+        analysisJobRepository.create(job);
+    }
+
+    private static AnalysisJob queuedJob(UUID analysisId, Instant queuedAt) {
+        return AnalysisJob.waitingForUser(UUID.randomUUID(), analysisId, NOW)
+                .awaitMoreUploads(NOW.plusSeconds(1))
+                .queueClassification(queuedAt);
     }
 
     private UUID insertGuestSession() throws Exception {

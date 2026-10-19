@@ -1,7 +1,9 @@
 package io.github.guillermodubon.invoward.extraction.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.analysis.domain.PriceTolerance;
@@ -22,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class PersistDetectedDocumentTransactionTest {
@@ -33,21 +36,55 @@ class PersistDetectedDocumentTransactionTest {
         UUID analysisId = UUID.randomUUID();
         AnalysisOwner owner = new RegisteredUserOwner(UUID.randomUUID());
         Analysis analysis = Analysis.create(analysisId, owner, PriceTolerance.exactMatch(), NOW)
-                .transitionToUploading(NOW);
+                .transitionToUploading(NOW).markClassifying(NOW);
         Document original = Document.createUploaded(
                 UUID.randomUUID(), analysisId, DocumentRole.REFERENCE, "reference.pdf", "application/pdf",
                 10, 1, "b".repeat(64), "private-key", null, NOW);
         Document concurrentResult = original.withDetectedType(DocumentType.PURCHASE_ORDER);
         AnalysisRepository analyses = mock(AnalysisRepository.class);
+        AnalysisJobRepository jobs = mock(AnalysisJobRepository.class);
         DocumentRepository documents = mock(DocumentRepository.class);
         when(analyses.findOwnedByIdForUpdate(analysisId, owner, NOW)).thenReturn(Optional.of(analysis));
+        when(jobs.findJobByAnalysisIdForUpdate(analysisId)).thenReturn(Optional.of(runningClassificationJob(analysisId)));
         when(documents.findByIdAndAnalysisId(original.id(), analysisId)).thenReturn(Optional.of(concurrentResult));
         PersistDetectedDocumentTransaction transaction = new PersistDetectedDocumentTransaction(
-                analyses, documents, Clock.fixed(NOW, ZoneOffset.UTC));
+                analyses, jobs, documents, Clock.fixed(NOW, ZoneOffset.UTC));
 
         Document result = transaction.persist(owner, original, DocumentType.QUOTE);
 
         assertEquals(DocumentType.PURCHASE_ORDER, result.detectedType());
         verify(documents, never()).updateTypes(original.withDetectedType(DocumentType.QUOTE));
+    }
+
+    @Test
+    void staleOrWaitingClassificationJobCannotPersistAProviderResult() {
+        UUID analysisId = UUID.randomUUID();
+        AnalysisOwner owner = new RegisteredUserOwner(UUID.randomUUID());
+        Analysis analysis = Analysis.create(analysisId, owner, PriceTolerance.exactMatch(), NOW)
+                .transitionToUploading(NOW).markClassifying(NOW);
+        Document document = Document.createUploaded(
+                UUID.randomUUID(), analysisId, DocumentRole.REFERENCE, "reference.pdf", "application/pdf",
+                10, 1, "c".repeat(64), "private-key", null, NOW);
+        AnalysisRepository analyses = mock(AnalysisRepository.class);
+        AnalysisJobRepository jobs = mock(AnalysisJobRepository.class);
+        DocumentRepository documents = mock(DocumentRepository.class);
+        when(analyses.findOwnedByIdForUpdate(analysisId, owner, NOW)).thenReturn(Optional.of(analysis));
+        when(jobs.findJobByAnalysisIdForUpdate(analysisId)).thenReturn(Optional.of(
+                AnalysisJob.waitingForUser(UUID.randomUUID(), analysisId, NOW)));
+        PersistDetectedDocumentTransaction transaction = new PersistDetectedDocumentTransaction(
+                analyses, jobs, documents, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+                io.github.guillermodubon.invoward.extraction.application.exception.DocumentClassificationConflictException.class,
+                () -> transaction.persist(owner, document, DocumentType.QUOTE));
+
+        verifyNoInteractions(documents);
+    }
+
+    private static AnalysisJob runningClassificationJob(UUID analysisId) {
+        return AnalysisJob.waitingForUser(UUID.randomUUID(), analysisId, NOW)
+                .awaitMoreUploads(NOW)
+                .queueClassification(NOW.plusSeconds(1))
+                .startQueuedAttempt(NOW.plusSeconds(2), 3);
     }
 }

@@ -24,6 +24,7 @@ import io.github.guillermodubon.invoward.reconciliation.application.port.LineIte
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchMethod;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -57,6 +58,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 /** Verifies registered-user ownership over the real matching HTTP flow and PostgreSQL state. */
@@ -102,6 +104,9 @@ class LineItemMatchesRegisteredOwnershipIntegrationIT {
 
     @MockitoBean
     private AmbiguousLineMatcher ambiguousLineMatcher;
+
+    @MockitoBean
+    private ProcessingWakePort processingWakePort;
 
     @MockitoSpyBean
     private DocumentRepository documentRepository;
@@ -163,11 +168,26 @@ class LineItemMatchesRegisteredOwnershipIntegrationIT {
                 matchesPath(registeredFixture.analysisId()) + "/confirm",
                 sessionA,
                 guestSession.id());
-        assertEquals(204, ownerConfirm.statusCode());
+        assertEquals(202, ownerConfirm.statusCode());
+        JsonNode confirmationStatus = objectMapper.readTree(ownerConfirm.body());
+        assertEquals("RECONCILING", confirmationStatus.get("status").asString());
+        assertEquals("QUEUED", confirmationStatus.get("jobStatus").asString());
+        assertEquals("RECONCILING", confirmationStatus.get("currentStage").asString());
+        assertEquals("/api/analyses/" + registeredFixture.analysisId() + "/status",
+                ownerConfirm.headers().firstValue("Location").orElseThrow());
         assertEquals("RECONCILING", jdbcTemplate.queryForObject(
                 "SELECT status FROM invoward.analyses WHERE id = ?",
                 String.class,
                 registeredFixture.analysisId()));
+        assertEquals("QUEUED", jdbcTemplate.queryForObject(
+                "SELECT status FROM invoward.analysis_jobs WHERE analysis_id = ?",
+                String.class,
+                registeredFixture.analysisId()));
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM invoward.reconciliation_lines WHERE analysis_id = ?",
+                Integer.class,
+                registeredFixture.analysisId()));
+        verify(processingWakePort).wake(registeredFixture.analysisId());
         assertEquals("RECONCILING", jdbcTemplate.queryForObject(
                 "SELECT current_stage FROM invoward.analysis_jobs WHERE analysis_id = ?",
                 String.class,

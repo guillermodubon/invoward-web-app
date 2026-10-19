@@ -6,14 +6,18 @@ import io.github.guillermodubon.invoward.reconciliation.application.port.Ambiguo
 
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Deterministic test-only matcher that performs no network I/O. */
 public final class FakeAmbiguousLineMatcher implements AmbiguousLineMatcher {
 
     private final AtomicInteger calls = new AtomicInteger();
     private final CopyOnWriteArrayList<AmbiguousLineMatchingInput> inputs = new CopyOnWriteArrayList<>();
+    private final AtomicReference<InvocationGate> nextSuggestionGate = new AtomicReference<>();
     private volatile Outcome outcome = Outcome.UNAVAILABLE;
     private volatile String candidateKey;
 
@@ -21,6 +25,7 @@ public final class FakeAmbiguousLineMatcher implements AmbiguousLineMatcher {
     public Optional<AmbiguousMatchSuggestion> suggest(AmbiguousLineMatchingInput input) {
         calls.incrementAndGet();
         inputs.add(input);
+        awaitGate(nextSuggestionGate.getAndSet(null));
         return switch (outcome) {
             case CANDIDATE -> Optional.of(new AmbiguousMatchSuggestion(candidateKey));
             case NO_MATCH -> Optional.of(new AmbiguousMatchSuggestion(AmbiguousMatchSuggestion.NO_MATCH));
@@ -66,9 +71,15 @@ public final class FakeAmbiguousLineMatcher implements AmbiguousLineMatcher {
         return size == 0 ? Optional.empty() : Optional.of(inputs.get(size - 1));
     }
 
+    /** Holds the next suggestion call until a test releases it. */
+    public void blockNextSuggestion(CountDownLatch entered, CountDownLatch release) {
+        nextSuggestionGate.set(new InvocationGate(entered, release));
+    }
+
     public void reset() {
         calls.set(0);
         inputs.clear();
+        nextSuggestionGate.set(null);
         candidateKey = null;
         outcome = Outcome.UNAVAILABLE;
     }
@@ -78,5 +89,23 @@ public final class FakeAmbiguousLineMatcher implements AmbiguousLineMatcher {
         NO_MATCH,
         INVALID_RESPONSE,
         UNAVAILABLE
+    }
+
+    private static void awaitGate(InvocationGate gate) {
+        if (gate == null) {
+            return;
+        }
+        gate.entered().countDown();
+        try {
+            if (!gate.release().await(15, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("test matcher gate timed out");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("test matcher gate interrupted");
+        }
+    }
+
+    private record InvocationGate(CountDownLatch entered, CountDownLatch release) {
     }
 }

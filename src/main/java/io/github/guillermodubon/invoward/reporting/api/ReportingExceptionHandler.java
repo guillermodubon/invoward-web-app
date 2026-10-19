@@ -1,6 +1,7 @@
 package io.github.guillermodubon.invoward.reporting.api;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisProcessingNotAllowedException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.ReconciliationConflictException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.ReconciliationNotFoundException;
 import io.github.guillermodubon.invoward.reporting.api.model.ReportingErrorResponse;
@@ -25,6 +26,13 @@ public class ReportingExceptionHandler {
     @ExceptionHandler(AnalysisNotFoundException.class)
     public ResponseEntity<ReportingErrorResponse> handleAnalysisNotFound(AnalysisNotFoundException exception) {
         return response(HttpStatus.NOT_FOUND, "ANALYSIS_NOT_FOUND", "Analysis was not found.");
+    }
+
+    @ExceptionHandler(AnalysisProcessingNotAllowedException.class)
+    public ResponseEntity<ReportingErrorResponse> handleProcessingNotAllowed(
+            AnalysisProcessingNotAllowedException exception) {
+        return response(HttpStatus.CONFLICT, "ANALYSIS_PROCESSING_NOT_ALLOWED",
+                "Analysis processing is not allowed in its current state.");
     }
 
     @ExceptionHandler(ReportNotFoundException.class)

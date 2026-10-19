@@ -27,6 +27,7 @@ import io.github.guillermodubon.invoward.reporting.application.model.CsvExport;
 import io.github.guillermodubon.invoward.reporting.application.model.GeneratedReportArtifact;
 import io.github.guillermodubon.invoward.reporting.application.port.GeneratedReportRepository;
 import io.github.guillermodubon.invoward.reporting.application.port.ReportArtifactGenerator;
+import io.github.guillermodubon.invoward.reporting.application.service.GenerateReportService;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import io.github.guillermodubon.invoward.support.storage.FakeReportStorage;
 import org.junit.jupiter.api.AfterEach;
@@ -122,6 +123,9 @@ class ReportingGuestOwnershipIntegrationIT {
     @Autowired
     private FakeReportStorage reportStorage;
 
+    @Autowired
+    private GenerateReportService generateReportService;
+
     @MockitoBean
     private GetReconciliationService reconciliationService;
 
@@ -170,13 +174,19 @@ class ReportingGuestOwnershipIntegrationIT {
 
         HttpResponse<String> created = postReport(
                 applicationUri(), fixture.analysisId(), csrf, guest.id().toString());
-        assertEquals(201, created.statusCode());
-        assertEquals("/api/analyses/" + fixture.analysisId() + "/report",
+        assertEquals(202, created.statusCode());
+        assertEquals("/api/analyses/" + fixture.analysisId() + "/status",
                 created.headers().firstValue("Location").orElseThrow());
         JsonNode createdBody = objectMapper.readTree(created.body());
-        assertEquals(guest.expiresAt().toString(), createdBody.get("expiresAt").asString());
-        assertExpiryCapped(createdBody, guest.expiresAt());
+        assertEquals("GENERATING_REPORT", createdBody.get("status").asString());
+        assertEquals("RUNNING", createdBody.get("jobStatus").asString());
         assertFalse(hasGuestCookieSet(created), "Nested report routes must not mint or rotate guest cookies.");
+        assertEquals(0, reportStorage.operationCalls(FakeReportStorage.Operation.STORE),
+                "The HTTP command must not store a PDF inline.");
+        verifyNoInteractions(reconciliationService, extractionService, artifactGenerator,
+                csvExportGenerator, generatedReportRepository);
+
+        generateReportService.generate(fixture.analysisId(), fixture.owner());
         assertEquals(guest.expiresAt(), persistedReportExpiry(fixture.analysisId()));
 
         HttpResponse<String> read = get(
@@ -213,7 +223,8 @@ class ReportingGuestOwnershipIntegrationIT {
         CsrfTicket csrf = csrfTicket(applicationUri());
         HttpResponse<String> reportCreated = postReport(
                 applicationUri(), guestAAnalysis.analysisId(), csrf, guestA.id().toString());
-        assertEquals(201, reportCreated.statusCode());
+        assertEquals(202, reportCreated.statusCode());
+        generateReportService.generate(guestAAnalysis.analysisId(), guestAAnalysis.owner());
 
         GuestSession guestB = createGuestSession(Duration.ofMinutes(10));
         Instant guestBLastSeen = guestLastSeen(guestB.id());
@@ -303,7 +314,8 @@ class ReportingGuestOwnershipIntegrationIT {
         analysis = analysisRepository.update(analysis.completeReconciliation(
                 AnalysisReconciliationStatus.REVIEW_REQUIRED,
                 new BigDecimal("10.0000"), startedAt.plusSeconds(6)));
-        job = analysisJobRepository.update(job.awaitReportGeneration(startedAt.plusSeconds(6)));
+        job = analysisJobRepository.update(job.queueReportGeneration(startedAt.plusSeconds(6)));
+        job = analysisJobRepository.update(job.startQueuedAttempt(startedAt.plusSeconds(7), 3));
         assertEquals(AnalysisStatus.GENERATING_REPORT, analysis.status());
         return new ReportFixture(analysisId, owner);
     }

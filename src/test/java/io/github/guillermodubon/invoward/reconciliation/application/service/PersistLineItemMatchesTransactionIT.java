@@ -28,9 +28,15 @@ import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import org.springframework.dao.DataAccessException;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -46,6 +52,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -61,6 +68,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doAnswer;
 
 @SpringBootTest(properties = {"invoward.email.provider=disabled", "spring.ai.model.chat=none"})
+@Import(PersistLineItemMatchesTransactionIT.ProcessingTestConfiguration.class)
 class PersistLineItemMatchesTransactionIT {
 
     @Autowired
@@ -90,13 +98,21 @@ class PersistLineItemMatchesTransactionIT {
     @Autowired
     private Clock clock;
 
+    @Autowired
+    private MatchingProcessingWakeProbe wakeProbe;
+
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
         PostgresTestContainer.configure(registry);
     }
 
+    @BeforeEach
+    void clearWakeProbe() {
+        wakeProbe.clear();
+    }
+
     @Test
-    void persistsPerfectSetAndAdvancesAnalysisAndJobToReconciliation() throws Exception {
+    void persistsPerfectSetAndQueuesReconciliationAfterTheMatchStage() throws Exception {
         MatchingFixture fixture = createFixture(2, 2);
         MatchingPlan plan = plan(fixture, false);
 
@@ -105,7 +121,9 @@ class PersistLineItemMatchesTransactionIT {
         assertEquals(plan.matches().size(), saved.size());
         assertEquals(databasePrecision(plan.matches()), saved);
         assertEquals(plan.matches().size(), lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
-        assertWorkflow(fixture, AnalysisStatus.RECONCILING);
+        assertWorkflow(fixture, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED);
+        assertEquals(List.of("QUEUED/RECONCILING/0"), wakeProbe.observedStates(),
+                "the after-commit wake must observe the durable next-stage queue state");
     }
 
     @Test
@@ -119,7 +137,8 @@ class PersistLineItemMatchesTransactionIT {
         assertEquals(AnalysisStatus.AWAITING_MATCH_REVIEW,
                 analysisRepository.findOwnedById(fixture.analysisId(), fixture.owner(), clock.instant())
                         .orElseThrow().status());
-        assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW);
+        assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW, AnalysisJobStatus.WAITING_FOR_USER);
+        assertTrue(wakeProbe.observedStates().isEmpty(), "a user review gate must not wake machine processing");
     }
 
     @Test
@@ -134,7 +153,8 @@ class PersistLineItemMatchesTransactionIT {
         assertThrows(DataAccessException.class, () -> transaction.persist(fixture.owner(), plan));
 
         assertEquals(0, lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
-        assertWorkflow(fixture, AnalysisStatus.MATCHING);
+        assertWorkflow(fixture, AnalysisStatus.MATCHING, AnalysisJobStatus.RUNNING);
+        assertTrue(wakeProbe.observedStates().isEmpty(), "a rolled-back match set must not publish a wake");
     }
 
     @Test
@@ -154,6 +174,8 @@ class PersistLineItemMatchesTransactionIT {
         assertEquals(firstAnalysis, analysisRepository.findOwnedById(
                 fixture.analysisId(), fixture.owner(), clock.instant()).orElseThrow());
         assertEquals(firstJob, analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow());
+        assertEquals(List.of("QUEUED/RECONCILING/0"), wakeProbe.observedStates(),
+                "an idempotent retry must not publish a second wake");
     }
 
     @Test
@@ -190,7 +212,8 @@ class PersistLineItemMatchesTransactionIT {
 
             assertEquals(firstResult, secondResult);
             assertEquals(1, lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
-            assertWorkflow(fixture, AnalysisStatus.RECONCILING);
+            assertWorkflow(fixture, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED);
+            assertEquals(1, wakeProbe.observedStates().size(), "only the winning transaction may wake processing");
         } finally {
             releaseLock.countDown();
             executor.shutdownNow();
@@ -208,7 +231,7 @@ class PersistLineItemMatchesTransactionIT {
                 () -> transaction.persist(fixture.owner(), completePlan));
 
         assertEquals(1, lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
-        assertWorkflow(fixture, AnalysisStatus.MATCHING);
+        assertWorkflow(fixture, AnalysisStatus.MATCHING, AnalysisJobStatus.RUNNING);
     }
 
     @Test
@@ -227,7 +250,22 @@ class PersistLineItemMatchesTransactionIT {
                 () -> transaction.persist(fixture.owner(), stalePlan));
 
         assertEquals(0, lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
-        assertWorkflow(fixture, AnalysisStatus.MATCHING);
+        assertWorkflow(fixture, AnalysisStatus.MATCHING, AnalysisJobStatus.RUNNING);
+    }
+
+    @Test
+    void rejectsNewMatchPersistenceUnlessTheMatchingJobIsRunning() throws Exception {
+        MatchingFixture fixture = createFixture(1, 1, false);
+
+        assertThrows(io.github.guillermodubon.invoward.reconciliation.application.exception
+                        .AnalysisMatchingNotAllowedException.class,
+                () -> transaction.persist(fixture.owner(), plan(fixture, false)));
+
+        assertEquals(0, lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
+        AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
+        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(AnalysisStatus.MATCHING, job.currentStage());
+        assertTrue(wakeProbe.observedStates().isEmpty());
     }
 
     private List<LineItemMatch> persistAfterGate(
@@ -241,6 +279,11 @@ class PersistLineItemMatchesTransactionIT {
     }
 
     private MatchingFixture createFixture(int referenceCount, int invoiceCount) throws Exception {
+        return createFixture(referenceCount, invoiceCount, true);
+    }
+
+    private MatchingFixture createFixture(int referenceCount, int invoiceCount, boolean runningMatchingJob)
+            throws Exception {
         Instant start = clock.instant().minusSeconds(120);
         UUID userId = jdbcTemplate.execute((ConnectionCallback<UUID>) DatabaseFixtures::insertUser);
         AnalysisOwner owner = new RegisteredUserOwner(userId);
@@ -259,13 +302,7 @@ class PersistLineItemMatchesTransactionIT {
         Instant confirmationAt = start.plusSeconds(3);
         analysis = analysisRepository.update(analysis.awaitExtractionConfirmation(confirmationAt));
         job = analysisJobRepository.update(job.waitForExtractionConfirmation(confirmationAt));
-        Instant matchingAt = start.plusSeconds(4);
-        analysisRepository.update(analysis.confirmExtraction(
-                "QUOTE", "Q-1", "INV-1", "Test Vendor", "USD",
-                BigDecimal.TEN, BigDecimal.TEN, matchingAt));
-        analysisJobRepository.update(job.waitForMatching(matchingAt));
-
-        Instant documentCreatedAt = start.plusSeconds(5);
+        Instant documentCreatedAt = start.plusSeconds(4);
         Document reference = createDocument(
                 analysisId, DocumentRole.REFERENCE, DocumentType.QUOTE, documentCreatedAt);
         Document invoice = createDocument(
@@ -274,6 +311,17 @@ class PersistLineItemMatchesTransactionIT {
                 reference, "reference", referenceCount, documentCreatedAt.plusSeconds(1));
         List<MatchableLineItem> invoiceLines = createConfirmedExtraction(
                 invoice, "invoice", invoiceCount, documentCreatedAt.plusSeconds(1));
+
+        Instant matchingAt = start.plusSeconds(7);
+        analysisRepository.update(analysis.confirmExtraction(
+                "QUOTE", "Q-1", "INV-1", "Test Vendor", "USD",
+                BigDecimal.TEN, BigDecimal.TEN, matchingAt));
+        if (runningMatchingJob) {
+            job = analysisJobRepository.update(job.queueMatching(matchingAt));
+            analysisJobRepository.update(job.startQueuedAttempt(matchingAt.plusSeconds(1), 3));
+        } else {
+            analysisJobRepository.update(job.waitForMatching(matchingAt));
+        }
         return new MatchingFixture(analysisId, owner, referenceLines, invoiceLines);
     }
 
@@ -366,17 +414,61 @@ class PersistLineItemMatchesTransactionIT {
         return timestamp == null ? null : timestamp.truncatedTo(ChronoUnit.MICROS);
     }
 
-    private void assertWorkflow(MatchingFixture fixture, AnalysisStatus expectedStage) {
+    private void assertWorkflow(
+            MatchingFixture fixture, AnalysisStatus expectedStage, AnalysisJobStatus expectedJobStatus) {
         Analysis analysis = analysisRepository.findOwnedById(
                 fixture.analysisId(), fixture.owner(), clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
         assertEquals(expectedStage, analysis.status());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(expectedJobStatus, job.status());
         assertEquals(expectedStage, job.currentStage());
-        assertEquals(0, job.attemptCount());
+        boolean running = expectedJobStatus == AnalysisJobStatus.RUNNING;
+        assertEquals(running ? 1 : 0, job.attemptCount());
         assertFalse(job.retryable());
-        assertNull(job.startedAt());
+        assertEquals(running, job.startedAt() != null);
         assertNull(job.completedAt());
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class ProcessingTestConfiguration {
+
+        @Bean
+        MatchingProcessingWakeProbe matchingProcessingWakeProbe(JdbcTemplate jdbcTemplate) {
+            return new MatchingProcessingWakeProbe(jdbcTemplate);
+        }
+
+        @Bean
+        @Primary
+        ProcessingWakePort processingWakePort(MatchingProcessingWakeProbe probe) {
+            return probe;
+        }
+    }
+
+    static final class MatchingProcessingWakeProbe implements ProcessingWakePort {
+
+        private final JdbcTemplate jdbcTemplate;
+        private final List<String> observedStates = new CopyOnWriteArrayList<>();
+
+        MatchingProcessingWakeProbe(JdbcTemplate jdbcTemplate) {
+            this.jdbcTemplate = jdbcTemplate;
+        }
+
+        @Override
+        public void wake(UUID analysisId) {
+            observedStates.add(jdbcTemplate.queryForObject(
+                    "SELECT status::text || '/' || current_stage::text || '/' || attempt_count::text "
+                            + "FROM invoward.analysis_jobs WHERE analysis_id = ?",
+                    String.class,
+                    analysisId));
+        }
+
+        List<String> observedStates() {
+            return List.copyOf(observedStates);
+        }
+
+        void clear() {
+            observedStates.clear();
+        }
     }
 
     private static void await(CountDownLatch latch) {

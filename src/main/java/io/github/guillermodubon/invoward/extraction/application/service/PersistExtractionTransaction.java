@@ -70,13 +70,13 @@ public class PersistExtractionTransaction {
         Instant now = clock.instant();
         Analysis analysis = analysisRepository.findOwnedByIdForUpdate(analysisId, owner, now)
                 .orElseThrow(AnalysisNotFoundException::new);
-        if (analysis.status() != AnalysisStatus.CLASSIFYING) {
+        if (analysis.status() != AnalysisStatus.EXTRACTING) {
             throw new ExtractionConflictException();
         }
 
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysisId)
-                .filter(current -> current.status() == AnalysisJobStatus.WAITING_FOR_USER
-                        && current.currentStage() == AnalysisStatus.CLASSIFYING)
+                .filter(current -> current.status() == AnalysisJobStatus.RUNNING
+                        && current.currentStage() == AnalysisStatus.EXTRACTING)
                 .orElseThrow(ExtractionConflictException::new);
         Instant transitionAt = latest(now, analysis.updatedAt(), job.updatedAt());
 
@@ -100,7 +100,7 @@ public class PersistExtractionTransaction {
                 ExtractionVersion.SCHEMA_VERSION, transitionAt);
 
         analysisRepository.update(analysis.awaitExtractionConfirmation(transitionAt));
-        analysisJobRepository.update(job.waitForExtractionConfirmation(transitionAt));
+        analysisJobRepository.update(job.finishExtractionAwaitingConfirmation(transitionAt));
 
         return new ExtractionReview(
                 reviewed(documents.reference(), reference),

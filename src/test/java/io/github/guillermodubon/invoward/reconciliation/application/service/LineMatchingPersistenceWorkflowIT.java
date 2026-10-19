@@ -27,6 +27,7 @@ import io.github.guillermodubon.invoward.reconciliation.application.port.LineIte
 import io.github.guillermodubon.invoward.reconciliation.domain.LineItemMatch;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchMethod;
 import io.github.guillermodubon.invoward.reconciliation.domain.LineMatchStatus;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
 import io.github.guillermodubon.invoward.support.ai.FakeAmbiguousLineMatcher;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
@@ -102,6 +103,9 @@ class LineMatchingPersistenceWorkflowIT {
 
     @MockitoBean
     private AmbiguousLineMatcher ambiguousLineMatcher;
+
+    @MockitoBean
+    private ProcessingWakePort processingWakePort;
 
     private final FakeAmbiguousLineMatcher fakeMatcher = new FakeAmbiguousLineMatcher();
 
@@ -182,7 +186,8 @@ class LineMatchingPersistenceWorkflowIT {
         List<LineItemMatch> confirmed = lineItemMatchRepository.findByAnalysisId(fixture.analysisId());
         assertCompleteCover(fixture, confirmed);
         assertTrue(confirmed.stream().allMatch(match -> match.reviewedAt() != null));
-        assertWorkflow(fixture, AnalysisStatus.RECONCILING);
+        assertWorkflow(fixture, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED);
+        org.mockito.Mockito.verify(processingWakePort).wake(fixture.analysisId());
         assertEquals(0, countRows("invoward.reconciliation_lines", fixture.analysisId()));
         assertEquals(0, countRows("invoward.discrepancies", fixture.analysisId()));
         assertNoVersionEightMigration();
@@ -245,12 +250,6 @@ class LineMatchingPersistenceWorkflowIT {
         Instant extractionReviewAt = startedAt.plusSeconds(3);
         analysis = analysisRepository.update(analysis.awaitExtractionConfirmation(extractionReviewAt));
         job = analysisJobRepository.update(job.waitForExtractionConfirmation(extractionReviewAt));
-        Instant matchingAt = startedAt.plusSeconds(4);
-        analysisRepository.update(analysis.confirmExtraction(
-                "QUOTE", "Q-1", "I-1", "Test Vendor", "USD",
-                BigDecimal.TEN, BigDecimal.TEN, matchingAt));
-        analysisJobRepository.update(job.waitForMatching(matchingAt));
-
         Instant documentsAt = startedAt.plusSeconds(5);
         Document reference = createDocument(analysisId, DocumentRole.REFERENCE, DocumentType.QUOTE, documentsAt);
         Document invoice = createDocument(analysisId, DocumentRole.INVOICE, DocumentType.INVOICE, documentsAt);
@@ -261,6 +260,12 @@ class LineMatchingPersistenceWorkflowIT {
                 new LineSpec(" abc-123 ", "invoice widget"),
                 new LineSpec(null, AMBIGUOUS_DESCRIPTION),
                 new LineSpec(null, AMBIGUOUS_DESCRIPTION)), documentsAt.plusSeconds(1));
+        Instant matchingAt = startedAt.plusSeconds(7);
+        analysisRepository.update(analysis.confirmExtraction(
+                "QUOTE", "Q-1", "I-1", "Test Vendor", "USD",
+                BigDecimal.TEN, BigDecimal.TEN, matchingAt));
+        job = analysisJobRepository.update(job.queueMatching(matchingAt));
+        analysisJobRepository.update(job.startQueuedAttempt(matchingAt.plusSeconds(1), 3));
         return new MatchingFixture(analysisId, owner, referenceIds, invoiceIds);
     }
 
@@ -314,11 +319,16 @@ class LineMatchingPersistenceWorkflowIT {
     }
 
     private void assertWorkflow(MatchingFixture fixture, AnalysisStatus expectedStatus) {
+        assertWorkflow(fixture, expectedStatus, AnalysisJobStatus.WAITING_FOR_USER);
+    }
+
+    private void assertWorkflow(
+            MatchingFixture fixture, AnalysisStatus expectedStatus, AnalysisJobStatus expectedJobStatus) {
         Analysis analysis = analysisRepository.findOwnedById(
                 fixture.analysisId(), fixture.owner(), clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysisId()).orElseThrow();
         assertEquals(expectedStatus, analysis.status());
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
+        assertEquals(expectedJobStatus, job.status());
         assertEquals(expectedStatus, job.currentStage());
         assertEquals(0, job.attemptCount());
         assertFalse(job.retryable());

@@ -7,6 +7,9 @@ import io.github.guillermodubon.invoward.identity.application.service.CurrentAcc
 import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
 import io.github.guillermodubon.invoward.analysis.api.GuestSessionCookieSupport;
 import io.github.guillermodubon.invoward.analysis.application.service.CreateAnalysisService;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
+import io.github.guillermodubon.invoward.analysis.application.service.RequestAnalysisProcessingService;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.GuestSessionOwner;
@@ -182,6 +185,9 @@ class SecurityConfigurationTest {
 
     @MockitoBean
     private ReconcileAnalysisService reconcileAnalysisService;
+
+    @MockitoBean
+    private RequestAnalysisProcessingService requestAnalysisProcessingService;
 
     @MockitoBean
     private GetReconciliationService getReconciliationService;
@@ -471,35 +477,33 @@ class SecurityConfigurationTest {
     }
 
     @Test
-    void reconcilePostWithAuthenticatedOwnerAndCsrfReachesControllerAndReturns200() throws Exception {
+    void reconcilePostWithAuthenticatedOwnerAndCsrfQueuesWorkAndReturns202() throws Exception {
         UUID analysisId = UUID.randomUUID();
         UUID userId = UUID.fromString("a3d9151b-50d3-42c4-9c08-9637795af0c1");
         AnalysisOwner owner = new RegisteredUserOwner(userId);
         when(analysisRequestOwnerResolver.resolveForRead(any(AuthenticatedIdentity.class),
                 any(HttpServletRequest.class))).thenReturn(Optional.of(owner));
-        when(reconcileAnalysisService.reconcile(eq(analysisId), eq(owner))).thenReturn(
-                new ReconciliationResult(analysisId, AnalysisStatus.GENERATING_REPORT,
-                        AnalysisReconciliationStatus.MATCHED, PriceTolerance.exactMatch(),
-                        null, null, null, DuplicateInvoiceWarning.none(),
-                        new ReconciliationSummary(0, 0, 0, 0, 0, 0, 0, 0), List.of(), List.of()));
+        when(requestAnalysisProcessingService.request(eq(analysisId), eq(owner), eq(AnalysisStatus.RECONCILING)))
+                .thenReturn(new AnalysisStatusSnapshot(
+                        analysisId, AnalysisStatus.RECONCILING, AnalysisJobStatus.QUEUED,
+                        AnalysisStatus.RECONCILING, false, null, null, Instant.parse("2026-10-17T12:00:00Z")));
 
         mockMvc.perform(post("/api/analyses/{id}/reconcile", analysisId)
                         .session(authenticatedSession())
                         .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
                                 .csrf().asHeader()))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(header().string("Location", "/api/analyses/" + analysisId + "/status"))
+                .andExpect(header().string("Cache-Control", "no-store"))
                 .andExpect(content().json("""
-                        {"analysisId":"%s","analysisStatus":"GENERATING_REPORT",
-                         "reconciliationStatus":"MATCHED","priceTolerancePercent":0,
-                         "duplicateInvoice":{"possibleDuplicate":false,"candidates":[]},
-                         "summary":{"lineCount":0,"matchedCount":0,"differentCount":0,
-                           "missingCount":0,"unexpectedCount":0,"openDiscrepancyCount":0,
-                           "acceptedDiscrepancyCount":0,"resolvedDiscrepancyCount":0},
-                         "lines":[],"discrepancies":[]}
+                        {"analysisId":"%s","status":"RECONCILING","jobStatus":"QUEUED",
+                         "currentStage":"RECONCILING","retryable":false}
                         """.formatted(analysisId)));
 
-        org.mockito.Mockito.verify(reconcileAnalysisService).reconcile(analysisId, owner);
+        org.mockito.Mockito.verify(requestAnalysisProcessingService)
+                .request(analysisId, owner, AnalysisStatus.RECONCILING);
+        org.mockito.Mockito.verifyNoInteractions(reconcileAnalysisService);
         org.mockito.Mockito.verify(analysisRequestOwnerResolver).recordSuccessfulActivity(owner);
     }
 
@@ -664,10 +668,30 @@ class SecurityConfigurationTest {
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(post(root + "/report/extra").with(csrf))
                 .andExpect(status().isUnauthorized());
+        mockMvc.perform(post(root + "/retry/extra").with(csrf))
+                .andExpect(status().isUnauthorized());
         mockMvc.perform(post(root + "/export.csv").with(csrf))
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(request(org.springframework.http.HttpMethod.DELETE, root + "/report").with(csrf))
                 .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void retryRouteIsGuestCompatibleButStillRequiresCsrf() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        String path = "/api/analyses/" + analysisId + "/retry";
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        assertCsrfFailure(post(path));
+
+        mockMvc.perform(post(path)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
     }
 
     @Test

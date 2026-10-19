@@ -2,12 +2,15 @@ package io.github.guillermodubon.invoward.analysis.infrastructure.persistence.ad
 
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.mapper.AnalysisJobPersistenceMapper;
 import io.github.guillermodubon.invoward.analysis.infrastructure.persistence.repository.SpringDataAnalysisJobJpaRepository;
 import jakarta.persistence.EntityNotFoundException;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -44,6 +47,30 @@ public class JpaAnalysisJobRepository implements AnalysisJobRepository {
     public Optional<AnalysisJob> findJobByAnalysisIdForUpdate(UUID analysisId) {
         Objects.requireNonNull(analysisId, "analysisId must not be null");
         return repository.findByAnalysisIdForUpdate(analysisId).map(mapper::toDomain);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<UUID> findAnalysisIdsByStatus(AnalysisJobStatus status, int limit) {
+        Objects.requireNonNull(status, "status must not be null");
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be positive");
+        }
+        return List.copyOf(repository.findAnalysisIdsByStatus(status, PageRequest.of(0, limit)));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<UUID> findAnalysisIdsByStatusAfter(
+            AnalysisJobStatus status,
+            UUID afterAnalysisId,
+            int limit) {
+        Objects.requireNonNull(status, "status must not be null");
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be positive");
+        }
+        return List.copyOf(repository.findAnalysisIdsByStatusAfter(
+                status, afterAnalysisId, PageRequest.of(0, limit)));
     }
 
     @Override

@@ -2,21 +2,20 @@ package io.github.guillermodubon.invoward.reporting.api;
 
 import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisProcessingNotAllowedException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
+import io.github.guillermodubon.invoward.analysis.application.service.RequestAnalysisProcessingService;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.analysis.domain.GuestSessionOwner;
 import io.github.guillermodubon.invoward.analysis.domain.RegisteredUserOwner;
 import io.github.guillermodubon.invoward.identity.application.model.AuthenticatedIdentity;
 import io.github.guillermodubon.invoward.identity.application.model.CurrentAccount;
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
-import io.github.guillermodubon.invoward.reporting.application.exception.AnalysisReportNotAllowedException;
-import io.github.guillermodubon.invoward.reporting.application.exception.ReportConflictException;
-import io.github.guillermodubon.invoward.reporting.application.exception.ReportGenerationException;
-import io.github.guillermodubon.invoward.reporting.application.exception.ReportInputNotReadyException;
 import io.github.guillermodubon.invoward.reporting.application.exception.ReportNotFoundException;
 import io.github.guillermodubon.invoward.reporting.application.exception.ReportStorageException;
-import io.github.guillermodubon.invoward.reporting.application.model.GenerateReportResult;
 import io.github.guillermodubon.invoward.reporting.application.model.ReportDownload;
-import io.github.guillermodubon.invoward.reporting.application.service.GenerateReportService;
 import io.github.guillermodubon.invoward.reporting.application.service.GetGeneratedReportService;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
@@ -42,14 +41,13 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.inOrder;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -63,18 +61,18 @@ class ReportControllerTest {
     private static final UUID GUEST_ID = UUID.randomUUID();
     private static final Instant GUEST_EXPIRY = Instant.parse("2026-10-16T12:00:00Z");
 
-    private final GenerateReportService generateService = mock(GenerateReportService.class);
+    private final RequestAnalysisProcessingService requestService = mock(RequestAnalysisProcessingService.class);
     private final GetGeneratedReportService getService = mock(GetGeneratedReportService.class);
     private final AnalysisRequestOwnerResolver ownerResolver = mock(AnalysisRequestOwnerResolver.class);
     private final AnalysisOwner guestOwner = new GuestSessionOwner(GUEST_ID, GUEST_EXPIRY);
-    private final RegisteredUserOwner registeredOwner = new RegisteredUserOwner(USER_ID);
+    private final AnalysisOwner registeredOwner = new RegisteredUserOwner(USER_ID);
     private final AuthenticatedIdentity identity = new CurrentAccount(
             USER_ID, "Test User", "test@example.com", true, UserStatus.ACTIVE);
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
-        mockMvc = standaloneSetup(new ReportController(generateService, getService, ownerResolver))
+        mockMvc = standaloneSetup(new ReportController(requestService, getService, ownerResolver))
                 .setControllerAdvice(new ReportingExceptionHandler())
                 .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
                 .build();
@@ -88,36 +86,124 @@ class ReportControllerTest {
     }
 
     @Test
-    void firstReportCreationReturns201LocationNoStoreAndSafeMetadata() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner))
-                .thenReturn(new GenerateReportResult(report(), true));
+    void pendingReportRequestReturns202AndStatusLocationWithoutRunningReportWorkInline() throws Exception {
+        when(requestService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.GENERATING_REPORT))
+                .thenReturn(snapshot(AnalysisStatus.GENERATING_REPORT, AnalysisJobStatus.QUEUED));
 
         String body = mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID)
                         .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
-                .andExpect(status().isCreated())
-                .andExpect(header().string(HttpHeaders.LOCATION, "/api/analyses/" + ANALYSIS_ID + "/report"))
+                .andExpect(status().isAccepted())
+                .andExpect(header().string(HttpHeaders.LOCATION, "/api/analyses/" + ANALYSIS_ID + "/status"))
                 .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.id").value(report().id().toString()))
-                .andExpect(jsonPath("$.contentType").value("application/pdf"))
-                .andExpect(jsonPath("$.sizeBytes").value(321))
-                .andExpect(jsonPath("$.generatedAt").value("2026-10-15T12:00:00Z"))
-                .andExpect(jsonPath("$.expiresAt").doesNotExist())
-                .andExpect(jsonPath("$.downloadUrl").value("https://objects.example.test/signed-report"))
-                .andExpect(jsonPath("$.downloadUrlExpiresAt").value("2026-10-15T12:05:00Z"))
+                .andExpect(jsonPath("$.analysisId").value(ANALYSIS_ID.toString()))
+                .andExpect(jsonPath("$.status").value("GENERATING_REPORT"))
+                .andExpect(jsonPath("$.jobStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.currentStage").value("GENERATING_REPORT"))
                 .andReturn().getResponse().getContentAsString();
 
-        assertFalse(body.contains("createdByThisCall"));
+        assertFalse(body.contains("downloadUrl"));
         assertFalse(body.contains("storageKey"));
-        assertFalse(body.contains("sha256"));
-        var order = inOrder(ownerResolver, generateService);
+        var order = inOrder(ownerResolver, requestService);
         order.verify(ownerResolver).resolveForRead(isNull(), any(HttpServletRequest.class));
-        order.verify(generateService).generate(ANALYSIS_ID, guestOwner);
+        order.verify(requestService).request(ANALYSIS_ID, guestOwner, AnalysisStatus.GENERATING_REPORT);
         order.verify(ownerResolver).recordSuccessfulActivity(guestOwner);
+        verifyNoInteractions(getService);
     }
 
     @Test
-    void getReturnsPersistedMetadataAndFreshSignedUrlWithoutNoStoreCaching() throws Exception {
+    void completedReportRequestReturns200StatusWithoutLocation() throws Exception {
+        when(requestService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.GENERATING_REPORT))
+                .thenReturn(snapshot(AnalysisStatus.COMPLETED, AnalysisJobStatus.COMPLETED));
+
+        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
+                .andExpect(status().isOk())
+                .andExpect(header().doesNotExist(HttpHeaders.LOCATION))
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.analysisId").value(ANALYSIS_ID.toString()))
+                .andExpect(jsonPath("$.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.jobStatus").value("COMPLETED"));
+
+        verify(requestService).request(ANALYSIS_ID, guestOwner, AnalysisStatus.GENERATING_REPORT);
+        verify(ownerResolver).recordSuccessfulActivity(guestOwner);
+        verifyNoInteractions(getService);
+    }
+
+    @Test
+    void postUsesAuthenticatedOwnerBeforeGuestCookie() throws Exception {
+        when(ownerResolver.resolveForRead(eq(identity), any(HttpServletRequest.class)))
+                .thenReturn(Optional.of(registeredOwner));
+        when(requestService.request(ANALYSIS_ID, registeredOwner, AnalysisStatus.GENERATING_REPORT))
+                .thenReturn(snapshot(AnalysisStatus.GENERATING_REPORT, AnalysisJobStatus.RUNNING));
+        authenticate(identity);
+
+        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID)
+                        .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("GENERATING_REPORT"));
+
+        verify(ownerResolver).resolveForRead(eq(identity), any(HttpServletRequest.class));
+        verify(requestService).request(ANALYSIS_ID, registeredOwner, AnalysisStatus.GENERATING_REPORT);
+        verify(ownerResolver).recordSuccessfulActivity(registeredOwner);
+        verify(ownerResolver, never()).recordSuccessfulActivity(guestOwner);
+        verifyNoInteractions(getService);
+    }
+
+    @Test
+    void unresolvedOwnerReturns404BeforeRequestingWork() throws Exception {
+        when(ownerResolver.resolveForRead(isNull(), any(HttpServletRequest.class))).thenReturn(Optional.empty());
+
+        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
+                .andExpect(status().isNotFound())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
+                        """));
+
+        verifyNoInteractions(requestService, getService);
+        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
+    }
+
+    @Test
+    void ownerScopedAnalysisNotFoundUsesUniform404() throws Exception {
+        when(requestService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.GENERATING_REPORT))
+                .thenThrow(new AnalysisNotFoundException());
+
+        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+
+        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
+        verifyNoInteractions(getService);
+    }
+
+    @Test
+    void invalidStageIsSafeConflict() throws Exception {
+        when(requestService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.GENERATING_REPORT))
+                .thenThrow(new AnalysisProcessingNotAllowedException());
+
+        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
+                .andExpect(status().isConflict())
+                .andExpect(content().json("""
+                        {"code":"ANALYSIS_PROCESSING_NOT_ALLOWED","message":"Analysis processing is not allowed in its current state."}
+                        """));
+
+        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
+        verifyNoInteractions(getService);
+    }
+
+    @Test
+    void invalidAnalysisIdReturnsSafeBadRequestBeforeServiceCall() throws Exception {
+        mockMvc.perform(post("/api/analyses/not-a-uuid/report"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().json("""
+                        {"code":"INVALID_REQUEST","message":"The request is invalid."}
+                        """));
+
+        verifyNoInteractions(requestService, getService);
+    }
+
+    @Test
+    void getReturnsPersistedMetadataAndFreshSignedUrlWithoutCaching() throws Exception {
         when(getService.get(ANALYSIS_ID, guestOwner)).thenReturn(report());
 
         String body = mockMvc.perform(get("/api/analyses/{analysisId}/report", ANALYSIS_ID)
@@ -141,7 +227,7 @@ class ReportControllerTest {
         order.verify(ownerResolver).resolveForRead(isNull(), any(HttpServletRequest.class));
         order.verify(getService).get(ANALYSIS_ID, guestOwner);
         order.verify(ownerResolver).recordSuccessfulActivity(guestOwner);
-        verifyNoInteractions(generateService);
+        verifyNoInteractions(requestService);
     }
 
     @Test
@@ -158,7 +244,7 @@ class ReportControllerTest {
         verify(getService).get(ANALYSIS_ID, registeredOwner);
         verify(ownerResolver).recordSuccessfulActivity(registeredOwner);
         verify(ownerResolver, never()).recordSuccessfulActivity(guestOwner);
-        verifyNoInteractions(generateService);
+        verifyNoInteractions(requestService);
     }
 
     @Test
@@ -171,24 +257,12 @@ class ReportControllerTest {
                         {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
                         """));
 
-        verifyNoInteractions(getService, generateService);
+        verifyNoInteractions(getService, requestService);
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
     }
 
     @Test
-    void getOwnerScopedAnalysisNotFoundDoesNotTouchGuestOrGenerateReport() throws Exception {
-        when(getService.get(ANALYSIS_ID, guestOwner)).thenThrow(new AnalysisNotFoundException());
-
-        mockMvc.perform(get("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
-
-        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-        verifyNoInteractions(generateService);
-    }
-
-    @Test
-    void getMissingReportReturnsStableNotFoundAndDoesNotTouchGuest() throws Exception {
+    void getMissingReportReturnsStableNotFound() throws Exception {
         when(getService.get(ANALYSIS_ID, guestOwner)).thenThrow(new ReportNotFoundException());
 
         mockMvc.perform(get("/api/analyses/{analysisId}/report", ANALYSIS_ID))
@@ -198,7 +272,7 @@ class ReportControllerTest {
                         """));
 
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-        verifyNoInteractions(generateService);
+        verifyNoInteractions(requestService);
     }
 
     @Test
@@ -213,149 +287,24 @@ class ReportControllerTest {
 
         assertFalse(body.contains("signed"));
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-        verifyNoInteractions(generateService);
+        verifyNoInteractions(requestService);
     }
 
     @Test
-    void getInvalidAnalysisIdReturnsSafeBadRequestBeforeAnyServiceCall() throws Exception {
+    void invalidGetAnalysisIdReturnsSafeBadRequestBeforeServiceCall() throws Exception {
         mockMvc.perform(get("/api/analyses/not-a-uuid/report"))
                 .andExpect(status().isBadRequest())
                 .andExpect(content().json("""
                         {"code":"INVALID_REQUEST","message":"The request is invalid."}
                         """));
 
-        verifyNoInteractions(getService, generateService);
+        verifyNoInteractions(getService, requestService);
     }
 
-    @Test
-    void existingImmutableReportReturns200WithoutLocation() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner))
-                .thenReturn(new GenerateReportResult(report(), false));
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isOk())
-                .andExpect(header().doesNotExist(HttpHeaders.LOCATION))
-                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
-                .andExpect(jsonPath("$.id").value(report().id().toString()));
-
-        verify(generateService).generate(ANALYSIS_ID, guestOwner);
-        verify(ownerResolver).recordSuccessfulActivity(guestOwner);
-    }
-
-    @Test
-    void authenticatedOwnerTakesPrecedenceOverGuestCookie() throws Exception {
-        when(ownerResolver.resolveForRead(eq(identity), any(HttpServletRequest.class)))
-                .thenReturn(Optional.of(registeredOwner));
-        when(generateService.generate(ANALYSIS_ID, registeredOwner))
-                .thenReturn(new GenerateReportResult(report(), false));
-        authenticate(identity);
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID)
-                        .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
-                .andExpect(status().isOk());
-
-        verify(ownerResolver).resolveForRead(eq(identity), any(HttpServletRequest.class));
-        verify(generateService).generate(ANALYSIS_ID, registeredOwner);
-        verify(ownerResolver).recordSuccessfulActivity(registeredOwner);
-        verify(ownerResolver, never()).recordSuccessfulActivity(guestOwner);
-    }
-
-    @Test
-    void unresolvedOwnerReturns404BeforeGenerationAndDoesNotTouchGuest() throws Exception {
-        when(ownerResolver.resolveForRead(isNull(), any(HttpServletRequest.class))).thenReturn(Optional.empty());
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isNotFound())
-                .andExpect(content().json("""
-                        {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
-                        """));
-
-        verifyNoInteractions(generateService);
-        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-    }
-
-    @Test
-    void ownerScopedAnalysisNotFoundUsesSameSafeResponse() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner)).thenThrow(new AnalysisNotFoundException());
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isNotFound())
-                .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
-
-        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-    }
-
-    @Test
-    void reportInputNotReadyIsSafeConflict() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner)).thenThrow(new ReportInputNotReadyException());
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isConflict())
-                .andExpect(content().json("""
-                        {"code":"REPORT_INPUT_NOT_READY","message":"The persisted reconciliation is not ready for report generation."}
-                        """));
-
-        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-    }
-
-    @Test
-    void workflowConflictsUseSafeStableCodes() throws Exception {
-        doThrow(new ReportConflictException()).when(generateService).generate(ANALYSIS_ID, guestOwner);
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("REPORT_CONFLICT"));
-
-        doThrow(new AnalysisReportNotAllowedException()).when(generateService).generate(ANALYSIS_ID, guestOwner);
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.code").value("ANALYSIS_REPORT_NOT_ALLOWED"));
-    }
-
-    @Test
-    void rendererFailureDoesNotLeakProviderDetails() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner))
-                .thenThrow(new ReportGenerationException(new IllegalStateException("private renderer detail")));
-
-        String body = mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("REPORT_GENERATION_FAILED"))
-                .andReturn().getResponse().getContentAsString();
-
-        assertFalse(body.contains("private renderer detail"));
-        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-    }
-
-    @Test
-    void unavailableStorageMapsTo503WithoutLeakingDetails() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner))
-                .thenThrow(new ReportStorageException(ReportStorageException.Failure.UNAVAILABLE));
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.code").value("REPORT_STORAGE_UNAVAILABLE"));
-
-        verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-    }
-
-    @Test
-    void nonAvailabilityStorageFailureMapsToGenericGenerationFailure() throws Exception {
-        when(generateService.generate(ANALYSIS_ID, guestOwner))
-                .thenThrow(new ReportStorageException(ReportStorageException.Failure.PERMISSION_DENIED));
-
-        mockMvc.perform(post("/api/analyses/{analysisId}/report", ANALYSIS_ID))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.code").value("REPORT_GENERATION_FAILED"));
-    }
-
-    @Test
-    void invalidAnalysisIdReturnsSafeBadRequest() throws Exception {
-        mockMvc.perform(post("/api/analyses/not-a-uuid/report"))
-                .andExpect(status().isBadRequest())
-                .andExpect(content().json("""
-                        {"code":"INVALID_REQUEST","message":"The request is invalid."}
-                        """));
-
-        verifyNoInteractions(generateService);
+    private static AnalysisStatusSnapshot snapshot(AnalysisStatus status, AnalysisJobStatus jobStatus) {
+        return new AnalysisStatusSnapshot(
+                ANALYSIS_ID, status, jobStatus, status, false, null, null,
+                Instant.parse("2026-10-16T12:00:00Z"));
     }
 
     private static ReportDownload report() {

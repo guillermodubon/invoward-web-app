@@ -1,7 +1,9 @@
 package io.github.guillermodubon.invoward.extraction.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
@@ -33,6 +35,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -51,7 +54,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -73,6 +78,7 @@ class ConfirmExtractionServiceTest {
     @Mock private AnalysisJobRepository analysisJobRepository;
     @Mock private DocumentRepository documentRepository;
     @Mock private ExtractedDocumentRepository extractedDocumentRepository;
+    @Mock private AnalysisProcessingSignalPublisher signalPublisher;
 
     private ConfirmExtractionService service;
     private Analysis analysis;
@@ -85,7 +91,8 @@ class ConfirmExtractionServiceTest {
     @BeforeEach
     void setUp() {
         service = new ConfirmExtractionService(analysisRepository, analysisJobRepository,
-                documentRepository, extractedDocumentRepository, Clock.fixed(NOW, ZoneOffset.UTC));
+                documentRepository, extractedDocumentRepository, signalPublisher,
+                Clock.fixed(NOW, ZoneOffset.UTC));
         analysis = analysis(AnalysisStatus.AWAITING_CONFIRMATION);
         job = job(AnalysisStatus.AWAITING_CONFIRMATION);
         reference = document(DocumentRole.REFERENCE, REFERENCE_ID, DocumentType.PURCHASE_ORDER);
@@ -112,7 +119,19 @@ class ConfirmExtractionServiceTest {
 
     @Test
     void confirmsBothDraftsAndCopiesTheReviewedSummaryWithoutCalculatingDifference() {
-        service.confirm(ANALYSIS_ID, OWNER, confirmation(0, 0));
+        AnalysisStatusSnapshot snapshot = service.confirm(ANALYSIS_ID, OWNER, confirmation(0, 0));
+
+        InOrder order = inOrder(extractedDocumentRepository, analysisRepository,
+                analysisJobRepository, signalPublisher);
+        order.verify(extractedDocumentRepository, times(2)).confirm(any(), eq(NOW));
+        order.verify(analysisRepository).update(any());
+        order.verify(analysisJobRepository).update(any());
+        order.verify(signalPublisher).request(ANALYSIS_ID);
+        assertEquals(ANALYSIS_ID, snapshot.analysisId());
+        assertEquals(AnalysisStatus.MATCHING, snapshot.status());
+        assertEquals(AnalysisJobStatus.QUEUED, snapshot.jobStatus());
+        assertEquals(AnalysisStatus.MATCHING, snapshot.currentStage());
+        assertEquals(NOW, snapshot.updatedAt());
 
         ArgumentCaptor<PersistedExtraction> extractions = ArgumentCaptor.forClass(PersistedExtraction.class);
         verify(extractedDocumentRepository, org.mockito.Mockito.times(2)).confirm(extractions.capture(), eq(NOW));
@@ -141,7 +160,7 @@ class ConfirmExtractionServiceTest {
         ArgumentCaptor<AnalysisJob> jobUpdate = ArgumentCaptor.forClass(AnalysisJob.class);
         verify(analysisJobRepository).update(jobUpdate.capture());
         AnalysisJob matchingJob = jobUpdate.getValue();
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, matchingJob.status());
+        assertEquals(AnalysisJobStatus.QUEUED, matchingJob.status());
         assertEquals(AnalysisStatus.MATCHING, matchingJob.currentStage());
         assertEquals(0, matchingJob.attemptCount());
         assertNull(matchingJob.startedAt());
@@ -171,6 +190,7 @@ class ConfirmExtractionServiceTest {
                 () -> service.confirm(ANALYSIS_ID, OWNER, confirmation(0, 0)));
 
         verifyNoInteractions(analysisJobRepository, documentRepository, extractedDocumentRepository);
+        verify(signalPublisher, never()).request(any());
     }
 
     @Test
@@ -193,6 +213,7 @@ class ConfirmExtractionServiceTest {
                 () -> service.confirm(ANALYSIS_ID, OWNER, confirmation(0, 0)));
 
         verifyNoInteractions(documentRepository, extractedDocumentRepository);
+        verify(signalPublisher, never()).request(any());
     }
 
     @Test
@@ -238,6 +259,7 @@ class ConfirmExtractionServiceTest {
         assertThrows(ExtractionConflictException.class,
                 () -> service.confirm(ANALYSIS_ID, OWNER, confirmation(0, 0)));
         verify(extractedDocumentRepository, never()).confirm(any(), any());
+        verify(signalPublisher, never()).request(any());
     }
 
     @Test

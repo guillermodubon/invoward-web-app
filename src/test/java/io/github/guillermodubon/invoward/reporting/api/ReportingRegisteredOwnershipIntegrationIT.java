@@ -27,6 +27,7 @@ import io.github.guillermodubon.invoward.reporting.application.model.CsvExport;
 import io.github.guillermodubon.invoward.reporting.application.model.GeneratedReportArtifact;
 import io.github.guillermodubon.invoward.reporting.application.port.GeneratedReportRepository;
 import io.github.guillermodubon.invoward.reporting.application.port.ReportArtifactGenerator;
+import io.github.guillermodubon.invoward.reporting.application.service.GenerateReportService;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import io.github.guillermodubon.invoward.support.storage.FakeReportStorage;
 import org.junit.jupiter.api.AfterEach;
@@ -125,6 +126,9 @@ class ReportingRegisteredOwnershipIntegrationIT {
     @Autowired
     private FakeReportStorage reportStorage;
 
+    @Autowired
+    private GenerateReportService generateReportService;
+
     @MockitoBean
     private GetReconciliationService reconciliationService;
 
@@ -168,20 +172,25 @@ class ReportingRegisteredOwnershipIntegrationIT {
 
         HttpResponse<String> postReport = postWithoutBody(
                 baseUri, reportPath(fixture.analysisId()), sessionA, unrelatedGuest.id());
-        assertEquals(201, postReport.statusCode());
-        assertEquals("/api/analyses/" + fixture.analysisId() + "/report",
+        assertEquals(202, postReport.statusCode());
+        assertEquals("/api/analyses/" + fixture.analysisId() + "/status",
                 postReport.headers().firstValue("Location").orElseThrow());
         assertEquals("application/json", mediaType(postReport));
-        JsonNode createdReport = objectMapper.readTree(postReport.body());
-        assertEquals("application/pdf", createdReport.get("contentType").asString());
-        assertTrue(createdReport.hasNonNull("downloadUrl"));
+        JsonNode pendingStatus = objectMapper.readTree(postReport.body());
+        assertEquals("GENERATING_REPORT", pendingStatus.get("status").asString());
+        assertEquals("RUNNING", pendingStatus.get("jobStatus").asString());
+        assertEquals(0, reportStorage.operationCalls(FakeReportStorage.Operation.STORE),
+                "The HTTP command must not store a PDF inline.");
+        verifyNoInteractions(reconciliationService, extractionService, artifactGenerator,
+                csvExportGenerator, generatedReportRepository);
+
+        generateReportService.generate(fixture.analysisId(), fixture.owner());
 
         HttpResponse<String> getReport = get(
                 baseUri, reportPath(fixture.analysisId()), sessionA.cookie(), unrelatedGuest.id());
         assertEquals(200, getReport.statusCode());
-        assertEquals(createdReport.get("id").asString(),
-                objectMapper.readTree(getReport.body()).get("id").asString());
         assertEquals("no-store", getReport.headers().firstValue("Cache-Control").orElseThrow());
+        assertTrue(objectMapper.readTree(getReport.body()).hasNonNull("downloadUrl"));
 
         HttpResponse<String> export = get(
                 baseUri, csvPath(fixture.analysisId()), sessionA.cookie(), unrelatedGuest.id());
@@ -243,7 +252,8 @@ class ReportingRegisteredOwnershipIntegrationIT {
         analysis = analysisRepository.update(analysis.completeReconciliation(
                 AnalysisReconciliationStatus.REVIEW_REQUIRED,
                 new BigDecimal("10.0000"), startedAt.plusSeconds(6)));
-        job = analysisJobRepository.update(job.awaitReportGeneration(startedAt.plusSeconds(6)));
+        job = analysisJobRepository.update(job.queueReportGeneration(startedAt.plusSeconds(6)));
+        job = analysisJobRepository.update(job.startQueuedAttempt(startedAt.plusSeconds(7), 3));
         assertEquals(AnalysisStatus.GENERATING_REPORT, analysis.status());
         return new ReportFixture(analysisId, owner, analysis);
     }

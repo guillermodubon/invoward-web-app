@@ -19,6 +19,13 @@ public interface SpringDataAnalysisJpaRepository extends JpaRepository<AnalysisJ
     Optional<AnalysisJpaEntity> findByIdAndGuestSessionIdAndExpiresAtAfter(
             UUID id, UUID guestSessionId, Instant now);
 
+    @Query("select analysis from AnalysisJpaEntity analysis where analysis.id = :analysisId")
+    Optional<AnalysisJpaEntity> findByIdForProcessing(@Param("analysisId") UUID analysisId);
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select analysis from AnalysisJpaEntity analysis where analysis.id = :analysisId")
+    Optional<AnalysisJpaEntity> findByIdForProcessingForUpdate(@Param("analysisId") UUID analysisId);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select analysis from AnalysisJpaEntity analysis "
             + "where analysis.id = :analysisId and analysis.userId = :userId")

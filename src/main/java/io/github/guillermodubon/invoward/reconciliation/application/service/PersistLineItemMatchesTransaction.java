@@ -2,6 +2,7 @@ package io.github.guillermodubon.invoward.reconciliation.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
@@ -50,6 +51,7 @@ public class PersistLineItemMatchesTransaction {
     private final DocumentRepository documentRepository;
     private final ExtractedDocumentRepository extractedDocumentRepository;
     private final LineItemMatchRepository lineItemMatchRepository;
+    private final AnalysisProcessingSignalPublisher signalPublisher;
     private final Clock clock;
 
     public PersistLineItemMatchesTransaction(
@@ -58,12 +60,14 @@ public class PersistLineItemMatchesTransaction {
             DocumentRepository documentRepository,
             ExtractedDocumentRepository extractedDocumentRepository,
             LineItemMatchRepository lineItemMatchRepository,
+            AnalysisProcessingSignalPublisher signalPublisher,
             Clock clock) {
         this.analysisRepository = Objects.requireNonNull(analysisRepository);
         this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
         this.documentRepository = Objects.requireNonNull(documentRepository);
         this.extractedDocumentRepository = Objects.requireNonNull(extractedDocumentRepository);
         this.lineItemMatchRepository = Objects.requireNonNull(lineItemMatchRepository);
+        this.signalPublisher = Objects.requireNonNull(signalPublisher);
         this.clock = Objects.requireNonNull(clock);
     }
 
@@ -93,7 +97,7 @@ public class PersistLineItemMatchesTransaction {
         }
 
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysisId)
-                .filter(current -> current.status() == AnalysisJobStatus.WAITING_FOR_USER
+                .filter(current -> current.status() == AnalysisJobStatus.RUNNING
                         && current.currentStage() == AnalysisStatus.MATCHING)
                 .orElseThrow(AnalysisMatchingNotAllowedException::new);
 
@@ -108,11 +112,14 @@ public class PersistLineItemMatchesTransaction {
                 ? analysis.beginReconciliation(transitionAt)
                 : analysis.awaitMatchReview(transitionAt);
         AnalysisJob updatedJob = fullyMatched
-                ? job.waitForReconciliation(transitionAt)
-                : job.waitForMatchReview(transitionAt);
+                ? job.queueReconciliation(transitionAt)
+                : job.finishMatchingAwaitingReview(transitionAt);
 
         analysisRepository.update(updatedAnalysis);
         analysisJobRepository.update(updatedJob);
+        if (fullyMatched) {
+            signalPublisher.request(analysisId);
+        }
         return persisted;
     }
 

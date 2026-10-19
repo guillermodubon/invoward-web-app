@@ -10,6 +10,7 @@ import io.github.guillermodubon.invoward.extraction.application.service.GetExtra
 import io.github.guillermodubon.invoward.extraction.application.service.UpdateExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.service.PrepareExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.service.PersistExtractionTransaction;
+import io.github.guillermodubon.invoward.extraction.application.service.RunDocumentExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.service.StartExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.service.ProviderOutputValidator;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
@@ -62,6 +63,13 @@ public class AiExtractionConfiguration {
             PrepareExtractionService preparationService,
             PersistExtractionTransaction persistenceTransaction) {
         return new StartExtractionService(preparationService, persistenceTransaction);
+    }
+
+    @Bean
+    RunDocumentExtractionService runDocumentExtractionService(
+            PrepareExtractionService preparationService,
+            PersistExtractionTransaction persistenceTransaction) {
+        return new RunDocumentExtractionService(preparationService, persistenceTransaction);
     }
 
     @Bean

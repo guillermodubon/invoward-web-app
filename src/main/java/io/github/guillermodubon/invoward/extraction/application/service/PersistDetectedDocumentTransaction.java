@@ -1,8 +1,11 @@
 package io.github.guillermodubon.invoward.extraction.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.document.application.exception.DocumentNotFoundException;
@@ -22,14 +25,17 @@ import java.util.Objects;
 public class PersistDetectedDocumentTransaction {
 
     private final AnalysisRepository analysisRepository;
+    private final AnalysisJobRepository analysisJobRepository;
     private final DocumentRepository documentRepository;
     private final Clock clock;
 
     public PersistDetectedDocumentTransaction(
             AnalysisRepository analysisRepository,
+            AnalysisJobRepository analysisJobRepository,
             DocumentRepository documentRepository,
             Clock clock) {
         this.analysisRepository = Objects.requireNonNull(analysisRepository);
+        this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
         this.documentRepository = Objects.requireNonNull(documentRepository);
         this.clock = Objects.requireNonNull(clock);
     }
@@ -46,8 +52,13 @@ public class PersistDetectedDocumentTransaction {
         Instant now = clock.instant();
         Analysis analysis = analysisRepository.findOwnedByIdForUpdate(document.analysisId(), owner, now)
                 .orElseThrow(AnalysisNotFoundException::new);
-        if (analysis.status() != AnalysisStatus.UPLOADING
-                && analysis.status() != AnalysisStatus.CLASSIFYING) {
+        if (analysis.status() != AnalysisStatus.CLASSIFYING) {
+            throw new DocumentClassificationConflictException();
+        }
+        AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysis.id())
+                .orElseThrow(DocumentClassificationConflictException::new);
+        if (job.status() != AnalysisJobStatus.RUNNING
+                || job.currentStage() != AnalysisStatus.CLASSIFYING) {
             throw new DocumentClassificationConflictException();
         }
         Document current = documentRepository.findByIdAndAnalysisId(document.id(), analysis.id())
@@ -57,9 +68,6 @@ public class PersistDetectedDocumentTransaction {
         }
         if (current.detectedType() != null) {
             return current;
-        }
-        if (analysis.status() != AnalysisStatus.UPLOADING) {
-            throw new DocumentClassificationConflictException();
         }
         return documentRepository.updateTypes(current.withDetectedType(suggestion))
                 .orElseThrow(DocumentNotFoundException::new);

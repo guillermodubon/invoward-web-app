@@ -2,6 +2,10 @@ package io.github.guillermodubon.invoward.reconciliation.api;
 
 import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisProcessingNotAllowedException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
+import io.github.guillermodubon.invoward.analysis.application.service.RequestAnalysisProcessingService;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisReconciliationStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
@@ -12,7 +16,6 @@ import io.github.guillermodubon.invoward.identity.application.model.Authenticate
 import io.github.guillermodubon.invoward.identity.application.model.CurrentAccount;
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
 import io.github.guillermodubon.invoward.extraction.domain.BoundingBox;
-import io.github.guillermodubon.invoward.reconciliation.application.exception.ReconciliationInputChangedException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.ReconciliationNotFoundException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.DiscrepancyConflictException;
 import io.github.guillermodubon.invoward.reconciliation.application.exception.DiscrepancyNotFoundException;
@@ -22,7 +25,6 @@ import io.github.guillermodubon.invoward.reconciliation.application.model.Discre
 import io.github.guillermodubon.invoward.reconciliation.application.model.DuplicateInvoiceWarning;
 import io.github.guillermodubon.invoward.reconciliation.application.model.ReconciliationResult;
 import io.github.guillermodubon.invoward.reconciliation.application.model.ReconciliationSummary;
-import io.github.guillermodubon.invoward.reconciliation.application.service.ReconcileAnalysisService;
 import io.github.guillermodubon.invoward.reconciliation.application.service.GetReconciliationService;
 import io.github.guillermodubon.invoward.reconciliation.application.service.GetDiscrepancyEvidenceService;
 import io.github.guillermodubon.invoward.reconciliation.application.service.UpdateDiscrepancyService;
@@ -87,7 +89,8 @@ class ReconciliationControllerTest {
     private static final UUID DOCUMENT_ID = UUID.randomUUID();
     private static final Instant NOW = Instant.parse("2026-10-11T12:00:00Z");
 
-    private final ReconcileAnalysisService reconcileService = mock(ReconcileAnalysisService.class);
+    private final RequestAnalysisProcessingService requestProcessingService =
+            mock(RequestAnalysisProcessingService.class);
     private final GetReconciliationService getReconciliationService = mock(GetReconciliationService.class);
     private final GetDiscrepancyEvidenceService getDiscrepancyEvidenceService =
             mock(GetDiscrepancyEvidenceService.class);
@@ -102,7 +105,7 @@ class ReconciliationControllerTest {
     void setUp() {
         mockMvc = standaloneSetup(new ReconciliationController(
                         getReconciliationService, getDiscrepancyEvidenceService,
-                        reconcileService, updateDiscrepancyService, ownerResolver))
+                        requestProcessingService, updateDiscrepancyService, ownerResolver))
                 .setControllerAdvice(new ReconciliationExceptionHandler(), new LineItemMatchesExceptionHandler())
                 .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
                 .build();
@@ -116,54 +119,46 @@ class ReconciliationControllerTest {
     }
 
     @Test
-    void postReturnsSynchronousSafeReconciliationRepresentationAndTouchesOwnerAfterSuccess() throws Exception {
-        when(reconcileService.reconcile(ANALYSIS_ID, guestOwner)).thenReturn(result());
+    void postReturnsAcceptedProcessingStatusAndPollingLocationForPendingReconciliation() throws Exception {
+        when(requestProcessingService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.RECONCILING))
+                .thenReturn(statusSnapshot(AnalysisStatus.RECONCILING,
+                        AnalysisJobStatus.QUEUED, AnalysisStatus.RECONCILING));
 
         String body = mockMvc.perform(post("/api/analyses/{analysisId}/reconcile", ANALYSIS_ID)
                         .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(header().string("Location", "/api/analyses/" + ANALYSIS_ID + "/status"))
                 .andExpect(jsonPath("$.analysisId").value(ANALYSIS_ID.toString()))
-                .andExpect(jsonPath("$.analysisStatus").value("GENERATING_REPORT"))
-                .andExpect(jsonPath("$.reconciliationStatus").value("REVIEW_REQUIRED"))
-                .andExpect(jsonPath("$.priceTolerancePercent").value(3))
-                .andExpect(jsonPath("$.priceToleranceAbsolute").value(5.0))
-                .andExpect(jsonPath("$.referenceTotal").value(20.0))
-                .andExpect(jsonPath("$.invoiceTotal").value(22.0))
-                .andExpect(jsonPath("$.difference").value(2.0))
-                .andExpect(jsonPath("$.duplicateInvoice.possibleDuplicate").value(true))
-                .andExpect(jsonPath("$.duplicateInvoice.candidates[0].analysisId").value(OTHER_ANALYSIS_ID.toString()))
-                .andExpect(jsonPath("$.duplicateInvoice.candidates[0].invoiceNumber").value("INV-42"))
-                .andExpect(jsonPath("$.summary.lineCount").value(1))
-                .andExpect(jsonPath("$.summary.differentCount").value(1))
-                .andExpect(jsonPath("$.summary.openDiscrepancyCount").value(1))
-                .andExpect(jsonPath("$.lines[0].id").value(LINE_ID.toString()))
-                .andExpect(jsonPath("$.lines[0].lineMatchId").value(MATCH_ID.toString()))
-                .andExpect(jsonPath("$.lines[0].status").value("DIFFERENT"))
-                .andExpect(jsonPath("$.lines[0].reference.itemCode").value("SKU-1"))
-                .andExpect(jsonPath("$.lines[0].invoice.unitPrice").value(11.0))
-                .andExpect(jsonPath("$.lines[0].unitPriceDifference").value(1.0))
-                .andExpect(jsonPath("$.discrepancies[0].id").value(DISCREPANCY_ID.toString()))
-                .andExpect(jsonPath("$.discrepancies[0].type").value("UNIT_PRICE_MISMATCH"))
-                .andExpect(jsonPath("$.discrepancies[0].resolutionStatus").value("OPEN"))
-                .andExpect(jsonPath("$.discrepancies[0].version").value(0))
+                .andExpect(jsonPath("$.status").value("RECONCILING"))
+                .andExpect(jsonPath("$.jobStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.currentStage").value("RECONCILING"))
                 .andReturn().getResponse().getContentAsString();
 
         assertFalse(body.contains(GUEST_ID.toString()));
         assertFalse(body.contains("userId"));
         assertFalse(body.contains("guestSessionId"));
-        assertFalse(body.contains("supplierKey"));
-        assertFalse(body.contains("storageKey"));
-        assertFalse(body.contains("sha256"));
-        assertFalse(body.contains("sourceText"));
-        assertFalse(body.contains("boundingBox"));
 
-        var order = inOrder(ownerResolver, reconcileService);
+        var order = inOrder(ownerResolver, requestProcessingService);
         order.verify(ownerResolver).resolveForRead(isNull(), any(HttpServletRequest.class));
-        order.verify(reconcileService).reconcile(ANALYSIS_ID, guestOwner);
+        order.verify(requestProcessingService).request(ANALYSIS_ID, guestOwner, AnalysisStatus.RECONCILING);
         order.verify(ownerResolver).recordSuccessfulActivity(guestOwner);
         verify(ownerResolver, never()).resolveForCreate(any(), any(HttpServletRequest.class));
+    }
+
+    @Test
+    void postReturnsCurrentStatusWhenReconciliationHasAlreadyAdvanced() throws Exception {
+        when(requestProcessingService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.RECONCILING))
+                .thenReturn(statusSnapshot(AnalysisStatus.GENERATING_REPORT,
+                        AnalysisJobStatus.QUEUED, AnalysisStatus.GENERATING_REPORT));
+
+        mockMvc.perform(post("/api/analyses/{analysisId}/reconcile", ANALYSIS_ID))
+                .andExpect(status().isOk())
+                .andExpect(header().doesNotExist("Location"))
+                .andExpect(header().string(HttpHeaders.CACHE_CONTROL, "no-store"))
+                .andExpect(jsonPath("$.status").value("GENERATING_REPORT"))
+                .andExpect(jsonPath("$.jobStatus").value("QUEUED"));
     }
 
     @Test
@@ -197,7 +192,7 @@ class ReconciliationControllerTest {
         verify(ownerResolver).resolveForRead(eq(identity), any(HttpServletRequest.class));
         verify(getReconciliationService).get(ANALYSIS_ID, registeredOwner);
         verify(ownerResolver).recordSuccessfulActivity(registeredOwner);
-        verifyNoInteractions(reconcileService);
+        verifyNoInteractions(requestProcessingService);
     }
 
     @Test
@@ -213,7 +208,7 @@ class ReconciliationControllerTest {
                         """));
 
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-        verifyNoInteractions(reconcileService);
+        verifyNoInteractions(requestProcessingService);
     }
 
     @Test
@@ -250,7 +245,7 @@ class ReconciliationControllerTest {
         assertFalse(body.contains("url"));
         verify(getDiscrepancyEvidenceService).get(ANALYSIS_ID, guestOwner, DISCREPANCY_ID);
         verify(ownerResolver).recordSuccessfulActivity(guestOwner);
-        verifyNoInteractions(reconcileService, getReconciliationService, updateDiscrepancyService);
+        verifyNoInteractions(requestProcessingService, getReconciliationService, updateDiscrepancyService);
     }
 
     @Test
@@ -280,7 +275,7 @@ class ReconciliationControllerTest {
                         """));
 
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-        verifyNoInteractions(reconcileService, getReconciliationService, updateDiscrepancyService);
+        verifyNoInteractions(requestProcessingService, getReconciliationService, updateDiscrepancyService);
     }
 
     @Test
@@ -296,7 +291,7 @@ class ReconciliationControllerTest {
                         {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
                         """));
 
-        verifyNoInteractions(getDiscrepancyEvidenceService, reconcileService, getReconciliationService,
+        verifyNoInteractions(getDiscrepancyEvidenceService, requestProcessingService, getReconciliationService,
                 updateDiscrepancyService);
         verify(ownerResolver, never()).resolveForCreate(any(), any(HttpServletRequest.class));
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
@@ -314,7 +309,7 @@ class ReconciliationControllerTest {
                         """));
 
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
-        verifyNoInteractions(reconcileService);
+        verifyNoInteractions(requestProcessingService);
     }
 
     @Test
@@ -328,7 +323,7 @@ class ReconciliationControllerTest {
                         {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
                         """));
 
-        verifyNoInteractions(getReconciliationService, reconcileService);
+        verifyNoInteractions(getReconciliationService, requestProcessingService);
         verify(ownerResolver, never()).resolveForCreate(any(), any(HttpServletRequest.class));
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
     }
@@ -338,15 +333,18 @@ class ReconciliationControllerTest {
         AnalysisOwner registeredOwner = new RegisteredUserOwner(USER_ID);
         when(ownerResolver.resolveForRead(eq(identity), any(HttpServletRequest.class)))
                 .thenReturn(Optional.of(registeredOwner));
-        when(reconcileService.reconcile(ANALYSIS_ID, registeredOwner)).thenReturn(result());
+        when(requestProcessingService.request(ANALYSIS_ID, registeredOwner, AnalysisStatus.RECONCILING))
+                .thenReturn(statusSnapshot(AnalysisStatus.RECONCILING,
+                        AnalysisJobStatus.RUNNING, AnalysisStatus.RECONCILING));
         authenticate(identity);
 
         mockMvc.perform(post("/api/analyses/{analysisId}/reconcile", ANALYSIS_ID)
                         .cookie(new Cookie("INVOWARD_GUEST", GUEST_ID.toString())))
-                .andExpect(status().isOk());
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("RECONCILING"));
 
         verify(ownerResolver).resolveForRead(eq(identity), any(HttpServletRequest.class));
-        verify(reconcileService).reconcile(ANALYSIS_ID, registeredOwner);
+        verify(requestProcessingService).request(ANALYSIS_ID, registeredOwner, AnalysisStatus.RECONCILING);
         verify(ownerResolver).recordSuccessfulActivity(registeredOwner);
         verify(ownerResolver, never()).recordSuccessfulActivity(guestOwner);
     }
@@ -362,35 +360,39 @@ class ReconciliationControllerTest {
                         {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
                         """));
 
-        verifyNoInteractions(reconcileService);
+        verifyNoInteractions(requestProcessingService);
         verify(ownerResolver, never()).resolveForCreate(any(), any(HttpServletRequest.class));
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
     }
 
     @Test
     void repeatedPostReturnsTheSameSuccessfulRepresentationFromIdempotentApplicationService() throws Exception {
-        when(reconcileService.reconcile(ANALYSIS_ID, guestOwner)).thenReturn(result());
+        AnalysisStatusSnapshot queued = statusSnapshot(AnalysisStatus.RECONCILING,
+                AnalysisJobStatus.QUEUED, AnalysisStatus.RECONCILING);
+        when(requestProcessingService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.RECONCILING))
+                .thenReturn(queued);
 
         String first = mockMvc.perform(post("/api/analyses/{analysisId}/reconcile", ANALYSIS_ID))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString();
         String second = mockMvc.perform(post("/api/analyses/{analysisId}/reconcile", ANALYSIS_ID))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString();
 
         assertEquals(first, second);
-        verify(reconcileService, times(2)).reconcile(ANALYSIS_ID, guestOwner);
+        verify(requestProcessingService, times(2)).request(ANALYSIS_ID, guestOwner, AnalysisStatus.RECONCILING);
         verify(ownerResolver, times(2)).recordSuccessfulActivity(guestOwner);
     }
 
     @Test
-    void reconciliationInputConflictReturnsSafeErrorAndDoesNotTouchGuest() throws Exception {
-        when(reconcileService.reconcile(ANALYSIS_ID, guestOwner)).thenThrow(new ReconciliationInputChangedException());
+    void invalidProcessingStateReturnsSafeConflictAndDoesNotTouchGuest() throws Exception {
+        when(requestProcessingService.request(ANALYSIS_ID, guestOwner, AnalysisStatus.RECONCILING))
+                .thenThrow(new AnalysisProcessingNotAllowedException());
 
         String body = mockMvc.perform(post("/api/analyses/{analysisId}/reconcile", ANALYSIS_ID))
                 .andExpect(status().isConflict())
                 .andExpect(content().json("""
-                        {"code":"RECONCILIATION_INPUT_CHANGED","message":"The reconciliation input changed before completion."}
+                        {"code":"ANALYSIS_PROCESSING_NOT_ALLOWED","message":"Analysis processing is not allowed in its current state."}
                         """))
                 .andReturn().getResponse().getContentAsString();
 
@@ -596,6 +598,14 @@ class ReconciliationControllerTest {
                 new BigDecimal("20.0000"), new BigDecimal("22.0000"), new BigDecimal("2.0000"),
                 duplicate, new ReconciliationSummary(1, 0, 1, 0, 0, 1, 0, 0),
                 List.of(line), List.of(discrepancy));
+    }
+
+    private static AnalysisStatusSnapshot statusSnapshot(
+            AnalysisStatus status,
+            AnalysisJobStatus jobStatus,
+            AnalysisStatus currentStage) {
+        return new AnalysisStatusSnapshot(
+                ANALYSIS_ID, status, jobStatus, currentStage, false, null, null, NOW);
     }
 
     private static void authenticate(AuthenticatedIdentity authenticatedIdentity) {

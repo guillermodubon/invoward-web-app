@@ -93,6 +93,28 @@ class AnalysisTest {
     }
 
     @Test
+    void beginsClassificationAndExtractionOnlyFromTheirLegalPredecessors() {
+        Analysis uploading = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1));
+
+        Analysis classifying = uploading.beginClassification(NOW.plusSeconds(2));
+        Analysis extracting = classifying.beginExtraction(NOW.plusSeconds(3));
+
+        assertEquals(AnalysisStatus.CLASSIFYING, classifying.status());
+        assertEquals(AnalysisStatus.EXTRACTING, extracting.status());
+        assertEquals(NOW.plusSeconds(2), classifying.updatedAt());
+        assertEquals(NOW.plusSeconds(3), extracting.updatedAt());
+        assertFalse(extracting.retryable());
+        assertNull(extracting.failureCode());
+        assertNull(extracting.failureUserMessage());
+        assertNull(extracting.completedAt());
+        assertThrows(IllegalStateException.class, () -> uploading.beginExtraction(NOW.plusSeconds(2)));
+        assertThrows(IllegalStateException.class, () -> extracting.beginClassification(NOW.plusSeconds(4)));
+        assertThrows(IllegalArgumentException.class, () -> uploading.beginClassification(NOW));
+    }
+
+    @Test
     void transitionsClassifyingAnalysisToAwaitingHumanExtractionConfirmation() {
         Analysis classifying = Analysis.create(
                 UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
@@ -116,6 +138,93 @@ class AnalysisTest {
                 () -> awaitingConfirmation.awaitExtractionConfirmation(NOW.plusSeconds(4)));
         assertThrows(IllegalArgumentException.class,
                 () -> classifying.awaitExtractionConfirmation(NOW.plusSeconds(1)));
+    }
+
+    @Test
+    void successfulExtractionCanMoveToHumanConfirmation() {
+        Analysis extracting = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .beginClassification(NOW.plusSeconds(2))
+                .beginExtraction(NOW.plusSeconds(3));
+
+        Analysis awaitingConfirmation = extracting.awaitExtractionConfirmation(NOW.plusSeconds(4));
+
+        assertEquals(AnalysisStatus.AWAITING_CONFIRMATION, awaitingConfirmation.status());
+        assertFalse(awaitingConfirmation.retryable());
+        assertNull(awaitingConfirmation.failureCode());
+        assertNull(awaitingConfirmation.failureUserMessage());
+        assertThrows(IllegalStateException.class,
+                () -> awaitingConfirmation.awaitExtractionConfirmation(NOW.plusSeconds(5)));
+    }
+
+    @Test
+    void processingFailureStoresOnlySafeClassifiedFieldsAtTheExpectedMachineStage() {
+        Analysis extracting = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .beginClassification(NOW.plusSeconds(2))
+                .beginExtraction(NOW.plusSeconds(3));
+
+        Analysis failed = extracting.failProcessing(
+                AnalysisStatus.EXTRACTING, "AI_PROVIDER_UNAVAILABLE", "Extraction is temporarily unavailable.",
+                true, NOW.plusSeconds(4));
+
+        assertEquals(AnalysisStatus.FAILED, failed.status());
+        assertTrue(failed.retryable());
+        assertEquals("AI_PROVIDER_UNAVAILABLE", failed.failureCode());
+        assertEquals("Extraction is temporarily unavailable.", failed.failureUserMessage());
+        assertNull(failed.completedAt());
+        assertEquals(NOW.plusSeconds(4), failed.updatedAt());
+        assertEquals(extracting.referenceTotal(), failed.referenceTotal());
+        assertThrows(IllegalStateException.class, () -> extracting.failProcessing(
+                AnalysisStatus.CLASSIFYING, "AI_PROVIDER_UNAVAILABLE", "Safe message", true, NOW.plusSeconds(4)));
+        assertThrows(IllegalStateException.class, () -> failed.failProcessing(
+                AnalysisStatus.EXTRACTING, "AI_PROVIDER_UNAVAILABLE", "Safe message", true, NOW.plusSeconds(5)));
+        assertThrows(IllegalArgumentException.class, () -> extracting.failProcessing(
+                AnalysisStatus.EXTRACTING, "provider details", "Safe message", true, NOW.plusSeconds(4)));
+        assertThrows(IllegalArgumentException.class, () -> extracting.failProcessing(
+                AnalysisStatus.EXTRACTING, "AI_PROVIDER_UNAVAILABLE", "unsafe\nmessage", true, NOW.plusSeconds(4)));
+        assertThrows(IllegalArgumentException.class, () -> extracting.failProcessing(
+                AnalysisStatus.EXTRACTING, "AI_PROVIDER_UNAVAILABLE", "Safe message", true, NOW.plusSeconds(2)));
+    }
+
+    @Test
+    void retryReturnsFailedAnalysisToThePersistedMachineStageAndClearsFailureState() {
+        Analysis failed = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .beginClassification(NOW.plusSeconds(2))
+                .beginExtraction(NOW.plusSeconds(3))
+                .failProcessing(AnalysisStatus.EXTRACTING, "EXTRACTION_FAILED", "Extraction failed safely.",
+                        true, NOW.plusSeconds(4));
+
+        Analysis retried = failed.retryProcessing(AnalysisStatus.EXTRACTING, NOW.plusSeconds(5));
+
+        assertEquals(AnalysisStatus.EXTRACTING, retried.status());
+        assertFalse(retried.retryable());
+        assertNull(retried.failureCode());
+        assertNull(retried.failureUserMessage());
+        assertNull(retried.completedAt());
+        assertEquals(failed.owner(), retried.owner());
+        assertEquals(failed.priceTolerance(), retried.priceTolerance());
+        assertEquals(failed.expiresAt(), retried.expiresAt());
+        assertEquals(NOW.plusSeconds(5), retried.updatedAt());
+        assertThrows(IllegalStateException.class,
+                () -> retried.retryProcessing(AnalysisStatus.EXTRACTING, NOW.plusSeconds(6)));
+        assertThrows(IllegalStateException.class,
+                () -> failed.retryProcessing(AnalysisStatus.UPLOADING, NOW.plusSeconds(5)));
+        assertThrows(IllegalArgumentException.class,
+                () -> failed.retryProcessing(AnalysisStatus.EXTRACTING, NOW.plusSeconds(3)));
+
+        Analysis terminalFailure = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .beginClassification(NOW.plusSeconds(2))
+                .failProcessing(AnalysisStatus.CLASSIFYING, "CLASSIFICATION_FAILED", "Classification failed safely.",
+                        false, NOW.plusSeconds(3));
+        assertThrows(IllegalStateException.class,
+                () -> terminalFailure.retryProcessing(AnalysisStatus.CLASSIFYING, NOW.plusSeconds(4)));
     }
 
     @Test

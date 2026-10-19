@@ -188,6 +188,67 @@ class AnalysisGuestOwnershipIntegrationIT {
         assertEquals(1, jobCount(replacementAnalysisId));
     }
 
+    @Test
+    void retryEndpointRequiresCsrfAndUsesExistingGuestOwnershipWithoutCreatingSessions() throws Exception {
+        URI baseUri = applicationUri();
+        CreatedGuestAnalysis guestA = createGuestAnalysis(baseUri);
+        UUID guestB = insertActiveGuestSession();
+        ExpiredGuestAnalysis expiredGuest = insertExpiredGuestAnalysis();
+        CsrfTicket csrf = csrfTicket(baseUri);
+        long guestSessionsBeforeRequests = guestSessionCount();
+
+        HttpResponse<String> missingCsrf = retryAnalysis(
+                baseUri, guestA.analysisId(), csrf, guestA.guestSessionId().toString(), false);
+        assertEquals(403, missingCsrf.statusCode());
+
+        HttpResponse<String> foreignOwner = retryAnalysis(
+                baseUri, guestA.analysisId(), csrf, guestB.toString(), true);
+        assertNotFound(foreignOwner);
+        assertEquals(NOT_FOUND_BODY, foreignOwner.body());
+
+        HttpResponse<String> expiredOwner = retryAnalysis(
+                baseUri, expiredGuest.analysisId(), csrf, expiredGuest.guestSessionId().toString(), true);
+        assertNotFound(expiredOwner);
+        assertEquals(NOT_FOUND_BODY, expiredOwner.body());
+
+        HttpResponse<String> missingOwner = retryAnalysis(baseUri, guestA.analysisId(), csrf, null, true);
+        assertNotFound(missingOwner);
+        assertEquals(NOT_FOUND_BODY, missingOwner.body());
+
+        assertEquals(guestSessionsBeforeRequests, guestSessionCount(),
+                "Retry must resolve an existing active guest and must never create one.");
+        assertTrue(missingCsrf.headers().allValues("Set-Cookie").stream()
+                .noneMatch(value -> value.startsWith(GUEST_COOKIE + "=")));
+        assertTrue(foreignOwner.headers().allValues("Set-Cookie").stream()
+                .noneMatch(value -> value.startsWith(GUEST_COOKIE + "=")));
+    }
+
+    @Test
+    void retryableGuestFailureReturnsAcceptedStatusResourceWithoutExposingGuestCredential() throws Exception {
+        URI baseUri = applicationUri();
+        CreatedGuestAnalysis guest = createGuestAnalysis(baseUri);
+        markAnalysisRetryableFailure(guest.analysisId());
+        CsrfTicket csrf = csrfTicket(baseUri);
+        long guestSessionsBeforeRetry = guestSessionCount();
+
+        HttpResponse<String> response = retryAnalysis(
+                baseUri, guest.analysisId(), csrf, guest.guestSessionId().toString(), true);
+
+        assertEquals(202, response.statusCode(), response.body());
+        assertEquals(analysisPath(guest.analysisId()) + "/status",
+                response.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
+        JsonNode body = objectMapper.readTree(response.body());
+        assertEquals(guest.analysisId().toString(), body.get("analysisId").asString());
+        assertEquals("CLASSIFYING", body.get("status").asString());
+        assertEquals("QUEUED", body.get("jobStatus").asString());
+        assertEquals("CLASSIFYING", body.get("currentStage").asString());
+        assertFalse(response.body().contains(guest.guestSessionId().toString()));
+        assertTrue(response.headers().allValues("Set-Cookie").stream()
+                .noneMatch(value -> value.startsWith(GUEST_COOKIE + "=")));
+        assertEquals(guestSessionsBeforeRetry, guestSessionCount());
+    }
+
     private CreatedGuestAnalysis createGuestAnalysis(URI baseUri) throws Exception {
         CsrfTicket csrf = csrfTicket(baseUri);
         HttpResponse<String> response = createAnalysis(baseUri, csrf, null);
@@ -210,6 +271,29 @@ class AnalysisGuestOwnershipIntegrationIT {
         request.header("Cookie", String.join("; ", cookies));
         return httpClient.send(
                 request.POST(HttpRequest.BodyPublishers.ofString("{}")).build(),
+                HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> retryAnalysis(
+            URI baseUri,
+            UUID analysisId,
+            CsrfTicket csrf,
+            String guestCookie,
+            boolean includeCsrf) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder(
+                        baseUri.resolve(analysisPath(analysisId) + "/retry"))
+                .timeout(Duration.ofSeconds(10));
+        List<String> cookies = new ArrayList<>();
+        cookies.add(SESSION_COOKIE + "=" + csrf.sessionCookie());
+        if (guestCookie != null) {
+            cookies.add(GUEST_COOKIE + "=" + guestCookie);
+        }
+        request.header("Cookie", String.join("; ", cookies));
+        if (includeCsrf) {
+            request.header(csrf.headerName(), csrf.token());
+        }
+        return httpClient.send(
+                request.POST(HttpRequest.BodyPublishers.noBody()).build(),
                 HttpResponse.BodyHandlers.ofString());
     }
 
@@ -300,6 +384,25 @@ class AnalysisGuestOwnershipIntegrationIT {
     private void setLastSeenAt(UUID id, Instant value) {
         jdbcTemplate.update("UPDATE invoward.guest_sessions SET last_seen_at = ? WHERE id = ?",
                 Timestamp.from(value), id);
+    }
+
+    private void markAnalysisRetryableFailure(UUID analysisId) {
+        Instant failedAt = Instant.now();
+        jdbcTemplate.update("""
+                UPDATE invoward.analyses
+                SET status = 'FAILED', failure_code = 'AI_PROVIDER_UNAVAILABLE',
+                    failure_user_message = 'Processing is temporarily unavailable.',
+                    retryable = TRUE, updated_at = ?
+                WHERE id = ?
+                """, Timestamp.from(failedAt), analysisId);
+        jdbcTemplate.update("""
+                UPDATE invoward.analysis_jobs
+                SET status = 'FAILED', current_stage = 'CLASSIFYING', attempt_count = 1,
+                    retryable = TRUE, last_error_code = 'AI_PROVIDER_UNAVAILABLE',
+                    last_error_message = 'AI provider unavailable.', started_at = ?,
+                    completed_at = NULL, updated_at = ?
+                WHERE analysis_id = ?
+                """, Timestamp.from(failedAt), Timestamp.from(failedAt), analysisId);
     }
 
     private UUID insertActiveGuestSession() {

@@ -59,6 +59,19 @@ public class JpaAnalysisRepository implements AnalysisRepository {
     }
 
     @Override
+    @Transactional(readOnly = true)
+    public Optional<Analysis> findByIdForProcessing(UUID analysisId) {
+        Objects.requireNonNull(analysisId, "analysisId must not be null");
+        return repository.findByIdForProcessing(analysisId).map(mapper::toDomain);
+    }
+
+    @Override
+    public Optional<Analysis> findByIdForProcessingForUpdate(UUID analysisId) {
+        Objects.requireNonNull(analysisId, "analysisId must not be null");
+        return repository.findByIdForProcessingForUpdate(analysisId).map(mapper::toDomain);
+    }
+
+    @Override
     public Analysis update(Analysis analysis) {
         Objects.requireNonNull(analysis, "analysis must not be null");
         AnalysisJpaEntity entity = repository.findById(analysis.id())

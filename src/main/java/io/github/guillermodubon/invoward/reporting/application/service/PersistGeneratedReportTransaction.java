@@ -67,8 +67,10 @@ public class PersistGeneratedReportTransaction {
 
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysis.id())
                 .orElseThrow(ReportConflictException::new);
-        if (job.status() != AnalysisJobStatus.WAITING_FOR_USER
-                || job.currentStage() != AnalysisStatus.GENERATING_REPORT) {
+        if (job.status() != AnalysisJobStatus.RUNNING
+                || job.currentStage() != AnalysisStatus.GENERATING_REPORT
+                || job.attemptCount() < 1
+                || job.startedAt() == null) {
             throw new ReportConflictException();
         }
         if (!Objects.equals(candidate.expiresAt(), analysis.expiresAt())

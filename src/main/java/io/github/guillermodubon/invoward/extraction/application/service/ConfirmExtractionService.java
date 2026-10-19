@@ -1,7 +1,9 @@
 package io.github.guillermodubon.invoward.extraction.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
@@ -43,6 +45,7 @@ public class ConfirmExtractionService {
     private final AnalysisJobRepository analysisJobRepository;
     private final DocumentRepository documentRepository;
     private final ExtractedDocumentRepository extractedDocumentRepository;
+    private final AnalysisProcessingSignalPublisher signalPublisher;
     private final Clock clock;
 
     public ConfirmExtractionService(
@@ -50,16 +53,21 @@ public class ConfirmExtractionService {
             AnalysisJobRepository analysisJobRepository,
             DocumentRepository documentRepository,
             ExtractedDocumentRepository extractedDocumentRepository,
+            AnalysisProcessingSignalPublisher signalPublisher,
             Clock clock) {
         this.analysisRepository = Objects.requireNonNull(analysisRepository);
         this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
         this.documentRepository = Objects.requireNonNull(documentRepository);
         this.extractedDocumentRepository = Objects.requireNonNull(extractedDocumentRepository);
+        this.signalPublisher = Objects.requireNonNull(signalPublisher);
         this.clock = Objects.requireNonNull(clock);
     }
 
     @Transactional
-    public void confirm(UUID analysisId, AnalysisOwner owner, ExtractionConfirmation confirmation) {
+    public AnalysisStatusSnapshot confirm(
+            UUID analysisId,
+            AnalysisOwner owner,
+            ExtractionConfirmation confirmation) {
         Objects.requireNonNull(analysisId, "analysisId must not be null");
         Objects.requireNonNull(owner, "owner must not be null");
         Objects.requireNonNull(confirmation, "confirmation must not be null");
@@ -94,14 +102,25 @@ public class ConfirmExtractionService {
         PersistedExtraction confirmedInvoice = confirm(invoice, transitionAt);
         Analysis matchingAnalysis = matchingAnalysis(
                 analysis, documents, reference, invoice, transitionAt);
-        AnalysisJob matchingJob = job.waitForMatching(transitionAt);
+        AnalysisJob matchingJob = job.queueMatching(transitionAt);
         if (extractedDocumentRepository.confirm(confirmedReference, transitionAt).isEmpty()
                 || extractedDocumentRepository.confirm(confirmedInvoice, transitionAt).isEmpty()) {
             throw new ExtractionConflictException();
         }
 
-        analysisRepository.update(matchingAnalysis);
-        analysisJobRepository.update(matchingJob);
+        Analysis persistedAnalysis = analysisRepository.update(matchingAnalysis);
+        AnalysisJob queuedJob = analysisJobRepository.update(matchingJob);
+        signalPublisher.request(analysisId);
+
+        return new AnalysisStatusSnapshot(
+                persistedAnalysis.id(),
+                persistedAnalysis.status(),
+                queuedJob.status(),
+                queuedJob.currentStage(),
+                persistedAnalysis.retryable(),
+                persistedAnalysis.failureCode(),
+                persistedAnalysis.failureUserMessage(),
+                persistedAnalysis.updatedAt());
     }
 
     private ExtractionDocuments requireDocuments(Analysis analysis, Instant now) {
