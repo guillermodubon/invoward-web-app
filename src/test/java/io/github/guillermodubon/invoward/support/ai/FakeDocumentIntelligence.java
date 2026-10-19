@@ -11,8 +11,11 @@ import io.github.guillermodubon.invoward.extraction.application.port.DocumentInt
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Deterministic test-only provider. It never performs network I/O. */
 public final class FakeDocumentIntelligence implements DocumentIntelligence {
@@ -21,6 +24,8 @@ public final class FakeDocumentIntelligence implements DocumentIntelligence {
     private final Map<UUID, Failure> classificationFailures = new ConcurrentHashMap<>();
     private final Map<UUID, AtomicInteger> classificationCalls = new ConcurrentHashMap<>();
     private final AtomicInteger extractionCalls = new AtomicInteger();
+    private final AtomicReference<InvocationGate> nextClassificationGate = new AtomicReference<>();
+    private final AtomicReference<InvocationGate> nextExtractionGate = new AtomicReference<>();
     private volatile ExtractionDraft extraction = new ExtractionDraft(
             null, null, null, null, null, null, null, null, List.of());
     private volatile Failure globalFailure;
@@ -28,6 +33,7 @@ public final class FakeDocumentIntelligence implements DocumentIntelligence {
     @Override
     public DocumentClassification classify(DocumentIntelligenceInput input) {
         classificationCalls.computeIfAbsent(input.documentId(), ignored -> new AtomicInteger()).incrementAndGet();
+        awaitGate(nextClassificationGate.getAndSet(null));
         Failure failure = classificationFailures.getOrDefault(input.documentId(), globalFailure);
         if (failure != null) {
             throw new DocumentIntelligenceException(failure);
@@ -38,6 +44,7 @@ public final class FakeDocumentIntelligence implements DocumentIntelligence {
     @Override
     public ExtractionDraft extract(DocumentIntelligenceInput input, DocumentType confirmedType) {
         extractionCalls.incrementAndGet();
+        awaitGate(nextExtractionGate.getAndSet(null));
         if (globalFailure != null) {
             throw new DocumentIntelligenceException(globalFailure);
         }
@@ -68,6 +75,16 @@ public final class FakeDocumentIntelligence implements DocumentIntelligence {
         this.extraction = extraction;
     }
 
+    /** Holds the next classification call until a test releases it. */
+    public void blockNextClassification(CountDownLatch entered, CountDownLatch release) {
+        nextClassificationGate.set(new InvocationGate(entered, release));
+    }
+
+    /** Holds the next extraction call until a test releases it. */
+    public void blockNextExtraction(CountDownLatch entered, CountDownLatch release) {
+        nextExtractionGate.set(new InvocationGate(entered, release));
+    }
+
     public int classifyCalls(UUID documentId) {
         AtomicInteger calls = classificationCalls.get(documentId);
         return calls == null ? 0 : calls.get();
@@ -86,7 +103,27 @@ public final class FakeDocumentIntelligence implements DocumentIntelligence {
         classificationFailures.clear();
         classificationCalls.clear();
         extractionCalls.set(0);
+        nextClassificationGate.set(null);
+        nextExtractionGate.set(null);
         extraction = new ExtractionDraft(null, null, null, null, null, null, null, null, List.of());
         globalFailure = null;
+    }
+
+    private static void awaitGate(InvocationGate gate) {
+        if (gate == null) {
+            return;
+        }
+        gate.entered().countDown();
+        try {
+            if (!gate.release().await(15, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("test provider gate timed out");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("test provider gate interrupted");
+        }
+    }
+
+    private record InvocationGate(CountDownLatch entered, CountDownLatch release) {
     }
 }

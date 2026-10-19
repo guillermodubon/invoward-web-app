@@ -1,8 +1,10 @@
 package io.github.guillermodubon.invoward.extraction.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.application.service.GetAnalysisService;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.analysis.domain.PriceTolerance;
@@ -53,6 +55,7 @@ class DetectDocumentTypesServiceTest {
     private static final AnalysisOwner OWNER = new RegisteredUserOwner(UUID.randomUUID());
 
     @Mock private GetAnalysisService analysisService;
+    @Mock private AnalysisJobRepository analysisJobRepository;
     @Mock private DocumentRepository documentRepository;
     @Mock private DocumentIntelligenceFileMaterializer materializer;
     @Mock private DocumentIntelligence documentIntelligence;
@@ -67,7 +70,7 @@ class DetectDocumentTypesServiceTest {
     @BeforeEach
     void setUp() {
         service = new DetectDocumentTypesService(
-                analysisService, documentRepository, materializer, documentIntelligence,
+                analysisService, analysisJobRepository, documentRepository, materializer, documentIntelligence,
                 persistTransaction, completeTransaction, Clock.fixed(NOW, ZoneOffset.UTC));
         lenient().when(documentIntelligence.classify(any())).thenAnswer(invocation -> {
             DocumentIntelligenceInput input = invocation.getArgument(0);
@@ -83,7 +86,7 @@ class DetectDocumentTypesServiceTest {
 
     @Test
     void classifiesBothMissingTypesInDeterministicRoleOrderAndCompletes() {
-        prepareUploading(List.of(invoice, reference));
+        prepareRunningClassification(List.of(invoice, reference));
         classify(reference, DocumentType.QUOTE);
         classify(invoice, DocumentType.INVOICE);
         when(completeTransaction.complete(OWNER, ANALYSIS_ID)).thenReturn(results(
@@ -102,7 +105,7 @@ class DetectDocumentTypesServiceTest {
     @Test
     void classifiesOnlyInvoiceWhenReferenceSuggestionAlreadyExists() {
         reference = reference.withDetectedType(DocumentType.QUOTE);
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         classify(invoice, DocumentType.INVOICE);
         when(completeTransaction.complete(OWNER, ANALYSIS_ID)).thenReturn(results(
                 reference, invoice.withDetectedType(DocumentType.INVOICE)));
@@ -117,7 +120,7 @@ class DetectDocumentTypesServiceTest {
     @Test
     void classifiesOnlyReferenceWhenInvoiceSuggestionAlreadyExists() {
         invoice = invoice.withDetectedType(DocumentType.INVOICE);
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         classify(reference, DocumentType.ESTIMATE);
         when(completeTransaction.complete(OWNER, ANALYSIS_ID)).thenReturn(results(
                 reference.withDetectedType(DocumentType.ESTIMATE), invoice));
@@ -133,20 +136,22 @@ class DetectDocumentTypesServiceTest {
     void alreadyClassifiedAnalysisReturnsPersistedValuesWithoutProviderCalls() {
         reference = reference.withDetectedType(DocumentType.UNKNOWN);
         invoice = invoice.withDetectedType(DocumentType.QUOTE);
-        prepareClassifying(List.of(invoice, reference));
+        prepareRunningClassification(List.of(invoice, reference));
+        when(completeTransaction.complete(OWNER, ANALYSIS_ID)).thenReturn(results(reference, invoice));
 
         List<DetectedDocumentType> result = service.detect(ANALYSIS_ID, OWNER);
 
         assertEquals(List.of(DocumentType.UNKNOWN, DocumentType.QUOTE), result.stream()
                 .map(DetectedDocumentType::detectedType).toList());
-        verifyNoInteractions(materializer, documentIntelligence, persistTransaction, completeTransaction);
+        verifyNoInteractions(materializer, documentIntelligence, persistTransaction);
+        verify(completeTransaction).complete(OWNER, ANALYSIS_ID);
     }
 
     @Test
     void unknownAndRoleIncompatibleSuggestionsAreAcceptedAsSuggestions() {
         classify(reference, DocumentType.INVOICE);
         classify(invoice, DocumentType.UNKNOWN);
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         when(completeTransaction.complete(OWNER, ANALYSIS_ID)).thenReturn(results(
                 reference.withDetectedType(DocumentType.INVOICE), invoice.withDetectedType(DocumentType.UNKNOWN)));
 
@@ -158,7 +163,7 @@ class DetectDocumentTypesServiceTest {
 
     @Test
     void missingEitherRequiredRoleFailsBeforeStorageOrAi() {
-        prepareUploading(List.of(reference));
+        prepareRunningClassification(List.of(reference));
 
         assertThrows(DocumentsRequiredException.class, () -> service.detect(ANALYSIS_ID, OWNER));
 
@@ -171,7 +176,7 @@ class DetectDocumentTypesServiceTest {
         Document expiredReference = Document.createUploaded(
                 UUID.randomUUID(), ANALYSIS_ID, DocumentRole.REFERENCE, "reference.pdf", "application/pdf",
                 10, 1, "a".repeat(64), "private-key", NOW.minusSeconds(1), createdAt);
-        prepareUploading(List.of(expiredReference, invoice));
+        prepareRunningClassification(List.of(expiredReference, invoice));
 
         assertThrows(DocumentClassificationConflictException.class,
                 () -> service.detect(ANALYSIS_ID, OWNER));
@@ -185,6 +190,7 @@ class DetectDocumentTypesServiceTest {
 
         assertThrows(AnalysisNotFoundException.class, () -> service.detect(ANALYSIS_ID, OWNER));
 
+        verifyNoInteractions(analysisJobRepository);
         verifyNoInteractions(documentRepository, materializer, documentIntelligence,
                 persistTransaction, completeTransaction);
     }
@@ -192,16 +198,30 @@ class DetectDocumentTypesServiceTest {
     @Test
     void laterAnalysisStateDoesNotCallProviderOrStorage() {
         when(analysisService.get(ANALYSIS_ID, OWNER)).thenReturn(analysis(AnalysisStatus.MATCHING));
-        when(documentRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(List.of(reference, invoice));
 
         assertThrows(DocumentClassificationConflictException.class, () -> service.detect(ANALYSIS_ID, OWNER));
 
-        verifyNoInteractions(materializer, documentIntelligence, persistTransaction, completeTransaction);
+        verifyNoInteractions(analysisJobRepository, documentRepository, materializer,
+                documentIntelligence, persistTransaction, completeTransaction);
+    }
+
+    @Test
+    void queuedOrWaitingClassificationJobIsRejectedBeforeReadingDocumentsOrCallingProvider() {
+        when(analysisService.get(ANALYSIS_ID, OWNER)).thenReturn(analysis(AnalysisStatus.CLASSIFYING));
+        when(analysisJobRepository.findByAnalysisId(ANALYSIS_ID))
+                .thenReturn(java.util.Optional.of(AnalysisJob.waitingForUser(
+                        UUID.randomUUID(), ANALYSIS_ID, NOW)));
+
+        assertThrows(DocumentClassificationConflictException.class,
+                () -> service.detect(ANALYSIS_ID, OWNER));
+
+        verifyNoInteractions(documentRepository, materializer, documentIntelligence,
+                persistTransaction, completeTransaction);
     }
 
     @Test
     void storageFailurePreventsAiPersistenceAndTransition() {
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         when(materializer.withMaterializedFile(eq(reference), anyOperation()))
                 .thenThrow(new DocumentStorageException(DocumentStorageException.Failure.UNAVAILABLE));
 
@@ -212,7 +232,7 @@ class DetectDocumentTypesServiceTest {
 
     @Test
     void unavailableProviderDoesNotPersistOrAdvanceWorkflow() {
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         applyOperation(reference);
         when(documentIntelligence.classify(any())).thenThrow(
                 new DocumentIntelligenceException(DocumentIntelligenceException.Failure.UNAVAILABLE));
@@ -224,7 +244,7 @@ class DetectDocumentTypesServiceTest {
 
     @Test
     void partialProviderFailurePreservesFirstDetectionAndRetryOnlyClassifiesMissingDocument() {
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         classify(reference, DocumentType.QUOTE);
         applyOperation(invoice);
         when(documentIntelligence.classify(any()))
@@ -240,7 +260,7 @@ class DetectDocumentTypesServiceTest {
 
     @Test
     void nullClassificationIsRejectedWithoutPersistence() {
-        prepareUploading(List.of(reference, invoice));
+        prepareRunningClassification(List.of(reference, invoice));
         applyOperation(reference);
         when(documentIntelligence.classify(any())).thenReturn(null);
 
@@ -250,8 +270,10 @@ class DetectDocumentTypesServiceTest {
         verifyNoInteractions(persistTransaction, completeTransaction);
     }
 
-    private void prepareUploading(List<Document> documents) {
-        when(analysisService.get(ANALYSIS_ID, OWNER)).thenReturn(analysis(AnalysisStatus.UPLOADING));
+    private void prepareRunningClassification(List<Document> documents) {
+        when(analysisService.get(ANALYSIS_ID, OWNER)).thenReturn(analysis(AnalysisStatus.CLASSIFYING));
+        when(analysisJobRepository.findByAnalysisId(ANALYSIS_ID))
+                .thenReturn(java.util.Optional.of(runningClassificationJob()));
         when(documentRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(documents);
         for (Document document : documents) {
             if (document.detectedType() != null) {
@@ -260,11 +282,6 @@ class DetectDocumentTypesServiceTest {
             lenient().when(documentRepository.findByIdAndAnalysisId(document.id(), ANALYSIS_ID))
                     .thenReturn(Optional.of(document));
         }
-    }
-
-    private void prepareClassifying(List<Document> documents) {
-        when(analysisService.get(ANALYSIS_ID, OWNER)).thenReturn(analysis(AnalysisStatus.CLASSIFYING));
-        when(documentRepository.findByAnalysisId(ANALYSIS_ID)).thenReturn(documents);
     }
 
     private void classify(Document document, DocumentType type) {
@@ -297,6 +314,13 @@ class DetectDocumentTypesServiceTest {
                 : status == AnalysisStatus.UPLOADING
                         ? created.transitionToUploading(NOW.plusSeconds(1))
                         : withStatus(created, status);
+    }
+
+    private static AnalysisJob runningClassificationJob() {
+        return AnalysisJob.waitingForUser(UUID.randomUUID(), ANALYSIS_ID, NOW)
+                .awaitMoreUploads(NOW)
+                .queueClassification(NOW.plusSeconds(1))
+                .startQueuedAttempt(NOW.plusSeconds(2), 3);
     }
 
     private static Analysis withStatus(Analysis source, AnalysisStatus status) {

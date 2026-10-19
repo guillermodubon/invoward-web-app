@@ -225,6 +225,107 @@ class PrepareExtractionServiceTest {
                 cacheService, documentStorage, documentIntelligence);
     }
 
+    @Test
+    void workerUsesPersistedConfirmedTypesAndCacheWithoutReconfirmingThem() {
+        givenWorkerState();
+        when(cacheService.findValid(confirmedReference.sha256(), MODEL, 1))
+                .thenReturn(Optional.of(cacheDraft("cached reference")));
+        when(cacheService.findValid(confirmedInvoice.sha256(), MODEL, 1))
+                .thenReturn(Optional.of(cacheDraft("cached invoice")));
+
+        ExtractionPreparation.Ready result = service.prepareForWorker(ANALYSIS_ID, OWNER);
+
+        assertEquals(ExtractionSource.CACHE, result.referenceExtraction().extractionSource());
+        assertEquals(ExtractionSource.CACHE, result.invoiceExtraction().extractionSource());
+        assertEquals(DocumentType.PURCHASE_ORDER, result.documents().reference().confirmedType());
+        assertEquals(DocumentType.INVOICE, result.documents().invoice().confirmedType());
+        verify(confirmTypesTransaction, never()).confirm(any(), any(), any());
+        verifyNoInteractions(documentStorage, documentIntelligence);
+    }
+
+    @Test
+    void workerCacheMissUsesProviderWithPersistedConfirmedTypes() {
+        givenWorkerState();
+        when(cacheService.findValid(any(), eq(MODEL), eq(1))).thenReturn(Optional.empty());
+        ExtractionDraft referenceOutput = validDraft("reference provider output");
+        ExtractionDraft invoiceOutput = validDraft("invoice provider output");
+        when(documentIntelligence.extract(any(), eq(DocumentType.PURCHASE_ORDER))).thenReturn(referenceOutput);
+        when(documentIntelligence.extract(any(), eq(DocumentType.INVOICE))).thenReturn(invoiceOutput);
+        when(cacheService.cacheProviderOutput(confirmedReference.sha256(), MODEL, referenceOutput, 1))
+                .thenReturn(aiDraft("reference provider output"));
+        when(cacheService.cacheProviderOutput(confirmedInvoice.sha256(), MODEL, invoiceOutput, 1))
+                .thenReturn(aiDraft("invoice provider output"));
+        materialize(confirmedReference);
+        materialize(confirmedInvoice);
+
+        ExtractionPreparation.Ready result = service.prepareForWorker(ANALYSIS_ID, OWNER);
+
+        assertEquals(ExtractionSource.AI, result.referenceExtraction().extractionSource());
+        assertEquals(ExtractionSource.AI, result.invoiceExtraction().extractionSource());
+        verify(documentIntelligence).extract(any(), eq(DocumentType.PURCHASE_ORDER));
+        verify(documentIntelligence).extract(any(), eq(DocumentType.INVOICE));
+        verify(confirmTypesTransaction, never()).confirm(any(), any(), any());
+    }
+
+    @Test
+    void workerRetryReusesFirstDocumentCacheAfterSecondProviderFailure() {
+        givenWorkerState();
+        when(cacheService.findValid(confirmedReference.sha256(), MODEL, 1))
+                .thenReturn(Optional.empty(), Optional.of(cacheDraft("cached reference")));
+        when(cacheService.findValid(confirmedInvoice.sha256(), MODEL, 1))
+                .thenReturn(Optional.empty(), Optional.empty());
+        ExtractionDraft referenceOutput = validDraft("reference provider output");
+        ExtractionDraft invoiceOutput = validDraft("invoice provider output");
+        when(documentIntelligence.extract(any(), eq(DocumentType.PURCHASE_ORDER))).thenReturn(referenceOutput);
+        when(documentIntelligence.extract(any(), eq(DocumentType.INVOICE)))
+                .thenThrow(new DocumentIntelligenceException(DocumentIntelligenceException.Failure.UNAVAILABLE))
+                .thenReturn(invoiceOutput);
+        when(cacheService.cacheProviderOutput(confirmedReference.sha256(), MODEL, referenceOutput, 1))
+                .thenReturn(aiDraft("reference provider output"));
+        when(cacheService.cacheProviderOutput(confirmedInvoice.sha256(), MODEL, invoiceOutput, 1))
+                .thenReturn(aiDraft("invoice provider output"));
+        materialize(confirmedReference);
+        materialize(confirmedInvoice);
+
+        assertThrows(DocumentIntelligenceException.class,
+                () -> service.prepareForWorker(ANALYSIS_ID, OWNER));
+        ExtractionPreparation.Ready retried = service.prepareForWorker(ANALYSIS_ID, OWNER);
+
+        assertEquals(ExtractionSource.CACHE, retried.referenceExtraction().extractionSource());
+        assertEquals(ExtractionSource.AI, retried.invoiceExtraction().extractionSource());
+        verify(documentIntelligence).extract(any(), eq(DocumentType.PURCHASE_ORDER));
+        verify(documentIntelligence, org.mockito.Mockito.times(2)).extract(any(), eq(DocumentType.INVOICE));
+        verify(cacheService).cacheProviderOutput(confirmedReference.sha256(), MODEL, referenceOutput, 1);
+    }
+
+    @Test
+    void workerRejectsExistingDraftPairWithoutDuplicatingOrCallingProvider() {
+        givenWorkerState();
+        when(extractedDocumentRepository.findByDocumentId(confirmedReference.id()))
+                .thenReturn(Optional.of(persisted(confirmedReference, ExtractionSource.AI)));
+        when(extractedDocumentRepository.findByDocumentId(confirmedInvoice.id()))
+                .thenReturn(Optional.of(persisted(confirmedInvoice, ExtractionSource.CACHE)));
+
+        assertThrows(ExtractionConflictException.class,
+                () -> service.prepareForWorker(ANALYSIS_ID, OWNER));
+
+        verifyNoInteractions(confirmTypesTransaction, cacheService, documentStorage, documentIntelligence);
+    }
+
+    private void givenWorkerState() {
+        Analysis extracting = Analysis.create(ANALYSIS_ID, OWNER, PriceTolerance.exactMatch(), NOW)
+                .transitionToUploading(NOW.plusSeconds(1))
+                .markClassifying(NOW.plusSeconds(2))
+                .beginExtraction(NOW.plusSeconds(3));
+        when(analysisService.get(ANALYSIS_ID, OWNER)).thenReturn(extracting);
+        when(documentRepository.findByAnalysisId(ANALYSIS_ID))
+                .thenReturn(List.of(confirmedInvoice, confirmedReference));
+        when(extractedDocumentRepository.findByDocumentId(confirmedReference.id()))
+                .thenReturn(Optional.empty());
+        when(extractedDocumentRepository.findByDocumentId(confirmedInvoice.id()))
+                .thenReturn(Optional.empty());
+    }
+
     private void materialize(Document document) {
         doNothing().when(documentStorage).downloadTo(eq(document.storageKey()), any(Path.class));
     }

@@ -2,6 +2,7 @@ package io.github.guillermodubon.invoward.document.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
@@ -26,6 +27,7 @@ import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -44,6 +46,10 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 @SpringBootTest(properties = {
         "invoward.email.provider=disabled",
@@ -68,6 +74,9 @@ class UploadDocumentTransactionIT {
 
     @Autowired
     private Clock clock;
+
+    @MockitoBean
+    private AnalysisProcessingSignalPublisher signalPublisher;
 
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
@@ -97,6 +106,7 @@ class UploadDocumentTransactionIT {
         assertFalse(updatedJob.retryable());
         assertNull(updatedJob.startedAt());
         assertNull(updatedJob.completedAt());
+        verify(signalPublisher, never()).request(any());
     }
 
     @Test
@@ -108,7 +118,55 @@ class UploadDocumentTransactionIT {
 
         assertEquals(1_024L, documentRepository.sumSizeBytesByAnalysisId(testAnalysis.analysis().id()));
         assertEquals(2, documentRepository.findByAnalysisId(testAnalysis.analysis().id()).size());
-        assertEquals(AnalysisStatus.UPLOADING, ownedAnalysis(testAnalysis).status());
+        assertEquals(AnalysisStatus.CLASSIFYING, ownedAnalysis(testAnalysis).status());
+        AnalysisJob job = analysisJobRepository.findByAnalysisId(testAnalysis.analysis().id()).orElseThrow();
+        assertEquals(AnalysisJobStatus.QUEUED, job.status());
+        assertEquals(AnalysisStatus.CLASSIFYING, job.currentStage());
+        verify(signalPublisher).request(testAnalysis.analysis().id());
+    }
+
+    @Test
+    void queuesClassificationWhenReferenceIsUploadedSecond() {
+        TestAnalysis testAnalysis = createAnalysis(true);
+        transaction.persist(testAnalysis.owner(), document(testAnalysis.analysis(), DocumentRole.INVOICE, 300));
+        verify(signalPublisher, never()).request(any());
+
+        transaction.persist(testAnalysis.owner(), document(testAnalysis.analysis(), DocumentRole.REFERENCE, 300));
+
+        assertEquals(AnalysisStatus.CLASSIFYING, ownedAnalysis(testAnalysis).status());
+        AnalysisJob job = analysisJobRepository.findByAnalysisId(testAnalysis.analysis().id()).orElseThrow();
+        assertEquals(AnalysisJobStatus.QUEUED, job.status());
+        assertEquals(AnalysisStatus.CLASSIFYING, job.currentStage());
+        verify(signalPublisher).request(testAnalysis.analysis().id());
+    }
+
+    @Test
+    void concurrentUploadsOfDifferentRolesQueueClassificationExactlyOnce() throws Exception {
+        TestAnalysis testAnalysis = createAnalysis(true);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> reference = executor.submit(() -> persistAfterConcurrentStart(
+                    testAnalysis, DocumentRole.REFERENCE, ready, start));
+            Future<?> invoice = executor.submit(() -> persistAfterConcurrentStart(
+                    testAnalysis, DocumentRole.INVOICE, ready, start));
+
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            reference.get(15, TimeUnit.SECONDS);
+            invoice.get(15, TimeUnit.SECONDS);
+
+            assertEquals(2, documentRepository.findByAnalysisId(testAnalysis.analysis().id()).size());
+            assertEquals(AnalysisStatus.CLASSIFYING, ownedAnalysis(testAnalysis).status());
+            AnalysisJob job = analysisJobRepository.findByAnalysisId(testAnalysis.analysis().id()).orElseThrow();
+            assertEquals(AnalysisJobStatus.QUEUED, job.status());
+            assertEquals(AnalysisStatus.CLASSIFYING, job.currentStage());
+            verify(signalPublisher, times(1)).request(testAnalysis.analysis().id());
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @Test
@@ -125,6 +183,7 @@ class UploadDocumentTransactionIT {
         assertEquals(1, documentRepository.findByAnalysisId(testAnalysis.analysis().id()).size());
         assertEquals(before, ownedAnalysis(testAnalysis));
         assertEquals(jobBefore, analysisJobRepository.findByAnalysisId(testAnalysis.analysis().id()).orElseThrow());
+        verify(signalPublisher, never()).request(any());
     }
 
     @Test
@@ -165,6 +224,7 @@ class UploadDocumentTransactionIT {
             assertEquals(AnalysisJobStatus.WAITING_FOR_USER, updatedJob.status());
             assertEquals(AnalysisStatus.UPLOADING, updatedJob.currentStage());
             assertEquals(0, updatedJob.attemptCount());
+            verify(signalPublisher, never()).request(any());
         } finally {
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
@@ -185,6 +245,7 @@ class UploadDocumentTransactionIT {
         assertEquals(1, documentRepository.findByAnalysisId(testAnalysis.analysis().id()).size());
         assertEquals(before, ownedAnalysis(testAnalysis));
         assertEquals(jobBefore, analysisJobRepository.findByAnalysisId(testAnalysis.analysis().id()).orElseThrow());
+        verify(signalPublisher, never()).request(any());
     }
 
     @Test
@@ -261,6 +322,23 @@ class UploadDocumentTransactionIT {
     private Analysis ownedAnalysis(TestAnalysis testAnalysis) {
         return analysisRepository.findOwnedById(
                 testAnalysis.analysis().id(), testAnalysis.owner(), clock.instant()).orElseThrow();
+    }
+
+    private void persistAfterConcurrentStart(
+            TestAnalysis testAnalysis,
+            DocumentRole role,
+            CountDownLatch ready,
+            CountDownLatch start) {
+        ready.countDown();
+        try {
+            if (!start.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("concurrent upload start timed out");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("concurrent upload was interrupted", interrupted);
+        }
+        transaction.persist(testAnalysis.owner(), document(testAnalysis.analysis(), role, 300));
     }
 
     private Document document(Analysis analysis, DocumentRole role, long sizeBytes) {

@@ -1,12 +1,16 @@
 package io.github.guillermodubon.invoward.extraction.api;
 
 import io.github.guillermodubon.invoward.document.domain.DocumentType;
+import io.github.guillermodubon.invoward.extraction.application.exception.DocumentIntelligenceException;
 import io.github.guillermodubon.invoward.extraction.application.model.ExtractionDraft;
 import io.github.guillermodubon.invoward.identity.domain.UserStatus;
+import io.github.guillermodubon.invoward.processing.application.port.ProcessingWakePort;
+import io.github.guillermodubon.invoward.processing.infrastructure.ProcessingWorker;
 import io.github.guillermodubon.invoward.support.ai.FakeDocumentIntelligence;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
 import io.github.guillermodubon.invoward.support.storage.FakeDocumentStorage;
+import io.github.guillermodubon.invoward.support.storage.FakeReportStorage;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDDocumentInformation;
 import org.apache.pdfbox.pdmodel.PDPage;
@@ -35,6 +39,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -74,6 +79,8 @@ class ExtractionRegisteredOwnershipIntegrationIT {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private FakeDocumentStorage storage;
     @Autowired private FakeDocumentIntelligence intelligence;
+    @Autowired private FakeReportStorage reportStorage;
+    @Autowired private ProcessingWorker processingWorker;
 
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
@@ -84,6 +91,7 @@ class ExtractionRegisteredOwnershipIntegrationIT {
     void clearTestDoubles() {
         storage.clear();
         intelligence.reset();
+        reportStorage.clear();
     }
 
     @Test
@@ -93,6 +101,7 @@ class ExtractionRegisteredOwnershipIntegrationIT {
         UserFixture userB = insertActiveVerifiedUser("extraction-owner-b");
         UUID validGuestSessionId = jdbcTemplate.execute(
                 (ConnectionCallback<UUID>) DatabaseFixtures::insertGuestSession);
+        Instant guestLastSeenAtBefore = guestLastSeenAt(validGuestSessionId);
         long guestSessionCountBefore = countGuestSessions();
 
         URI baseUri = applicationUri();
@@ -103,12 +112,17 @@ class ExtractionRegisteredOwnershipIntegrationIT {
                 baseUri, "/api/analyses", sessionA, validGuestSessionId, "{}");
         assertEquals(202, createdAnalysis.statusCode());
         UUID analysisId = UUID.fromString(objectMapper.readTree(createdAnalysis.body()).get("id").asString());
+        String analysisPath = analysisPath(analysisId);
         assertEquals("/api/analyses/" + analysisId,
                 createdAnalysis.headers().firstValue("Location").orElseThrow());
         assertEquals(1, jdbcTemplate.queryForObject("""
                 SELECT COUNT(*) FROM invoward.analyses
                 WHERE id = ? AND user_id = ? AND guest_session_id IS NULL AND expires_at IS NULL
                 """, Integer.class, analysisId, userA.id()));
+        HttpResponse<String> initialStatus = get(
+                baseUri, analysisPath(analysisId) + "/status", sessionA, validGuestSessionId);
+        assertEquals(200, initialStatus.statusCode());
+        assertEquals("CREATED", objectMapper.readTree(initialStatus.body()).get("status").asString());
 
         UUID referenceDocumentId = uploadDocument(
                 baseUri, analysisId, sessionA, validGuestSessionId, "REFERENCE", validPdf("reference"));
@@ -116,14 +130,66 @@ class ExtractionRegisteredOwnershipIntegrationIT {
                 baseUri, analysisId, sessionA, validGuestSessionId, "INVOICE", validPdf("invoice"));
         assertEquals(2, storage.operationCalls(FakeDocumentStorage.Operation.STORE));
 
+        String detectTypesPath = analysisPath(analysisId) + "/documents/detect-types";
+        HttpResponse<String> classificationRequested = postWithoutBody(
+                baseUri, detectTypesPath, sessionA, validGuestSessionId);
+        assertEquals(202, classificationRequested.statusCode(), classificationRequested.body());
+        assertEquals("/api/analyses/" + analysisId + "/status",
+                classificationRequested.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store", classificationRequested.headers().firstValue("Cache-Control").orElseThrow());
+        JsonNode queuedClassification = objectMapper.readTree(classificationRequested.body());
+        assertEquals("CLASSIFYING", queuedClassification.get("status").asString());
+        assertEquals("QUEUED", queuedClassification.get("jobStatus").asString());
+        assertEquals("CLASSIFYING", queuedClassification.get("currentStage").asString());
+        assertEquals(0, intelligence.totalClassifyCalls(), "the HTTP command must not invoke AI");
+
+        HttpResponse<String> repeatedClassificationRequest = postWithoutBody(
+                baseUri, detectTypesPath, sessionA, validGuestSessionId);
+        assertEquals(202, repeatedClassificationRequest.statusCode(), repeatedClassificationRequest.body());
+        assertEquals(1, jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM invoward.analysis_jobs
+                WHERE analysis_id = ? AND status = 'QUEUED' AND current_stage = 'CLASSIFYING'
+                  AND attempt_count = 0
+                """, Integer.class, analysisId), "repeated request must not enqueue another attempt");
+        assertEquals(0, intelligence.totalClassifyCalls(), "repeat command must still not invoke AI");
+
+        intelligence.configureFailure(DocumentIntelligenceException.Failure.UNAVAILABLE);
+        processingWorker.process(analysisId);
+        HttpResponse<String> failedClassification = get(
+                baseUri, analysisPath(analysisId) + "/status", sessionA, validGuestSessionId);
+        assertEquals(200, failedClassification.statusCode());
+        JsonNode failedStatus = objectMapper.readTree(failedClassification.body());
+        assertEquals("FAILED", failedStatus.get("status").asString());
+        assertEquals("CLASSIFYING", failedStatus.get("currentStage").asString());
+        assertTrue(failedStatus.get("retryable").asBoolean());
+        assertEquals("AI_PROVIDER_UNAVAILABLE", failedStatus.get("failureCode").asString());
+        assertEquals(1, intelligence.totalClassifyCalls());
+
+        HttpResponse<String> retried = postWithoutBody(
+                baseUri, analysisPath(analysisId) + "/retry", sessionA, validGuestSessionId);
+        assertEquals(202, retried.statusCode(), retried.body());
+        assertEquals("/api/analyses/" + analysisId + "/status",
+                retried.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store", retried.headers().firstValue("Cache-Control").orElseThrow());
+        JsonNode queuedRetry = objectMapper.readTree(retried.body());
+        assertEquals("CLASSIFYING", queuedRetry.get("status").asString());
+        assertEquals("QUEUED", queuedRetry.get("jobStatus").asString());
+        assertEquals("CLASSIFYING", queuedRetry.get("currentStage").asString());
+        assertEquals(1, intelligence.totalClassifyCalls(), "retry HTTP must only queue work");
+
+        intelligence.clearFailure();
         intelligence.setClassification(referenceDocumentId, DocumentType.QUOTE);
         intelligence.setClassification(invoiceDocumentId, DocumentType.INVOICE);
         intelligence.setExtraction(extractionDraft());
-        HttpResponse<String> detected = postWithoutBody(
-                baseUri, analysisPath(analysisId) + "/documents/detect-types", sessionA, validGuestSessionId);
-        assertEquals(200, detected.statusCode());
-        assertEquals(2, objectMapper.readTree(detected.body()).size());
-        assertEquals(2, intelligence.totalClassifyCalls());
+        processingWorker.process(analysisId);
+        assertEquals(3, intelligence.totalClassifyCalls());
+
+        HttpResponse<String> alreadyDetected = postWithoutBody(
+                baseUri, detectTypesPath, sessionA, validGuestSessionId);
+        assertEquals(200, alreadyDetected.statusCode(), alreadyDetected.body());
+        assertTrue(alreadyDetected.headers().firstValue("Location").isEmpty());
+        assertEquals("CLASSIFYING", objectMapper.readTree(alreadyDetected.body()).get("status").asString());
+        assertEquals(3, intelligence.totalClassifyCalls(), "completed detection must not be repeated");
 
         HttpResponse<String> started = postJson(
                 baseUri,
@@ -133,15 +199,29 @@ class ExtractionRegisteredOwnershipIntegrationIT {
                 """
                 {"referenceType":"QUOTE","invoiceType":"INVOICE"}
                 """);
-        assertEquals(200, started.statusCode());
-        JsonNode initialReview = objectMapper.readTree(started.body());
+        assertEquals(202, started.statusCode(), started.body());
+        assertEquals("/api/analyses/" + analysisId + "/status",
+                started.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store", started.headers().firstValue("Cache-Control").orElseThrow());
+        JsonNode queued = objectMapper.readTree(started.body());
+        assertEquals(analysisId.toString(), queued.get("analysisId").asString());
+        assertEquals("EXTRACTING", queued.get("status").asString());
+        assertEquals("QUEUED", queued.get("jobStatus").asString());
+        assertEquals("EXTRACTING", queued.get("currentStage").asString());
+        assertEquals(0, intelligence.extractCalls(), "the request must not invoke extraction providers");
+
+        processingWorker.process(analysisId);
+        assertEquals(2, intelligence.extractCalls());
+
+        String path = analysisPath(analysisId) + "/extraction";
+        HttpResponse<String> initialReviewResponse = get(baseUri, path, sessionA, validGuestSessionId);
+        assertEquals(200, initialReviewResponse.statusCode());
+        JsonNode initialReview = objectMapper.readTree(initialReviewResponse.body());
         assertEquals("DRAFT", initialReview.get("reference").get("status").asString());
         assertEquals("DRAFT", initialReview.get("invoice").get("status").asString());
         assertEquals(1, initialReview.get("reference").get("lines").size());
         assertEquals(1, initialReview.get("invoice").get("lines").size());
-        assertEquals(2, intelligence.extractCalls());
 
-        String path = analysisPath(analysisId) + "/extraction";
         HttpResponse<String> readReview = get(baseUri, path, sessionA, validGuestSessionId);
         assertEquals(200, readReview.statusCode());
         assertEquals("DRAFT", objectMapper.readTree(readReview.body())
@@ -152,7 +232,7 @@ class ExtractionRegisteredOwnershipIntegrationIT {
         assertEquals(200, updated.statusCode());
         JsonNode updatedReview = objectMapper.readTree(updated.body());
         assertEquals("User-corrected supplier", updatedReview.get("reference").get("vendorName").asString());
-        assertEquals("User-corrected reference line",
+        assertEquals("Reference industrial fastener assembly",
                 updatedReview.get("reference").get("lines").get(0).get("description").asString());
 
         HttpResponse<String> confirmed = postJson(
@@ -161,7 +241,14 @@ class ExtractionRegisteredOwnershipIntegrationIT {
                 sessionA,
                 validGuestSessionId,
                 confirmationRequest(updatedReview));
-        assertEquals(204, confirmed.statusCode());
+        assertEquals(202, confirmed.statusCode(), confirmed.body());
+        assertEquals("/api/analyses/" + analysisId + "/status",
+                confirmed.headers().firstValue("Location").orElseThrow());
+        assertEquals("no-store", confirmed.headers().firstValue("Cache-Control").orElseThrow());
+        JsonNode queuedMatching = objectMapper.readTree(confirmed.body());
+        assertEquals("MATCHING", queuedMatching.get("status").asString());
+        assertEquals("QUEUED", queuedMatching.get("jobStatus").asString());
+        assertEquals("MATCHING", queuedMatching.get("currentStage").asString());
 
         HttpResponse<String> confirmedReview = get(baseUri, path, sessionA, validGuestSessionId);
         assertEquals(200, confirmedReview.statusCode());
@@ -172,14 +259,94 @@ class ExtractionRegisteredOwnershipIntegrationIT {
                 "SELECT COUNT(*) FROM invoward.analyses WHERE id = ? AND status = 'MATCHING'",
                 Integer.class,
                 analysisId));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM invoward.analysis_jobs "
+                        + "WHERE analysis_id = ? AND status = 'QUEUED' AND current_stage = 'MATCHING'",
+                Integer.class,
+                analysisId));
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM invoward.line_item_matches WHERE analysis_id = ?",
+                Integer.class,
+                analysisId), "matching must not run in the confirmation request");
         assertEquals(guestSessionCountBefore, countGuestSessions(),
                 "an authenticated request carrying a valid guest cookie must not create a guest session");
+
+        // Drive persisted stages explicitly so HTTP commands can be checked independently of worker execution.
+        processingWorker.process(analysisId);
+        HttpResponse<String> matchesResponse = get(
+                baseUri, analysisPath + "/matches", sessionA, validGuestSessionId);
+        assertEquals(200, matchesResponse.statusCode(), matchesResponse.body());
+        JsonNode matchSet = objectMapper.readTree(matchesResponse.body());
+        assertTrue(matchSet.get("reviewRequired").asBoolean());
+        assertTrue(matchSet.get("matches").valueStream()
+                .anyMatch(match -> "UNMATCHED_REFERENCE".equals(match.get("status").asString())));
+        assertTrue(matchSet.get("matches").valueStream()
+                .anyMatch(match -> "UNMATCHED_INVOICE".equals(match.get("status").asString())));
+
+        HttpResponse<String> confirmedMatches = postWithoutBody(
+                baseUri, analysisPath + "/matches/confirm", sessionA, validGuestSessionId);
+        assertEquals(202, confirmedMatches.statusCode(), confirmedMatches.body());
+        assertEquals("RECONCILING", objectMapper.readTree(confirmedMatches.body()).get("status").asString());
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM invoward.reconciliation_lines WHERE analysis_id = ?",
+                Integer.class,
+                analysisId), "reconciliation must not run in the match-confirmation request");
+
+        HttpResponse<String> reconciliationRequested = postWithoutBody(
+                baseUri, analysisPath + "/reconcile", sessionA, validGuestSessionId);
+        assertEquals(202, reconciliationRequested.statusCode(), reconciliationRequested.body());
+        assertEquals("RECONCILING", objectMapper.readTree(reconciliationRequested.body()).get("status").asString());
+        assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM invoward.reconciliation_lines WHERE analysis_id = ?",
+                Integer.class,
+                analysisId), "the reconcile HTTP command must only queue work");
+        processingWorker.process(analysisId);
+
+        HttpResponse<String> reconciliationResponse = get(
+                baseUri, analysisPath + "/reconciliation", sessionA, validGuestSessionId);
+        assertEquals(200, reconciliationResponse.statusCode(), reconciliationResponse.body());
+        JsonNode reconciliation = objectMapper.readTree(reconciliationResponse.body());
+        assertEquals(2, reconciliation.get("summary").get("lineCount").asInt());
+        assertEquals(1, reconciliation.get("summary").get("missingCount").asInt());
+        assertEquals(1, reconciliation.get("summary").get("unexpectedCount").asInt());
+
+        HttpResponse<String> reportRequested = postWithoutBody(
+                baseUri, analysisPath + "/report", sessionA, validGuestSessionId);
+        assertEquals(202, reportRequested.statusCode(), reportRequested.body());
+        assertEquals("GENERATING_REPORT", objectMapper.readTree(reportRequested.body()).get("status").asString());
+        assertEquals(0, reportStorage.operationCalls(FakeReportStorage.Operation.STORE),
+                "the report HTTP command must not render or store a report");
+        processingWorker.process(analysisId);
+
+        HttpResponse<String> completedStatus = get(
+                baseUri, analysisPath + "/status", sessionA, validGuestSessionId);
+        assertEquals("COMPLETED", objectMapper.readTree(completedStatus.body()).get("status").asString());
+        HttpResponse<String> reportResponse = get(
+                baseUri, analysisPath + "/report", sessionA, validGuestSessionId);
+        assertEquals(200, reportResponse.statusCode(), reportResponse.body());
+        assertEquals("application/pdf", objectMapper.readTree(reportResponse.body())
+                .get("contentType").asString());
+        assertFalse(reportResponse.body().contains("storageKey"));
+        HttpResponse<String> csvResponse = get(
+                baseUri, analysisPath + "/export.csv", sessionA, validGuestSessionId);
+        assertEquals(200, csvResponse.statusCode(), csvResponse.body());
+        assertTrue(csvResponse.headers().firstValue("Content-Type").orElseThrow()
+                .startsWith("text/csv;charset=UTF-8"));
+        assertTrue(csvResponse.body().contains("MISSING_ITEM"));
+        assertTrue(csvResponse.body().contains("UNEXPECTED_ITEM"));
 
         EnumMap<FakeDocumentStorage.Operation, Integer> storageCallsBeforeOtherUser = storageCallCounts();
         int classificationCallsBeforeOtherUser = intelligence.totalClassifyCalls();
         int extractionCallsBeforeOtherUser = intelligence.extractCalls();
+        EnumMap<FakeReportStorage.Operation, Integer> reportCallsBeforeOtherUser = reportCallCounts();
 
-        String analysisPath = analysisPath(analysisId);
+        assertNotFound(get(baseUri, analysisPath, sessionB, validGuestSessionId));
+        assertNotFound(get(baseUri, analysisPath + "/status", sessionB, validGuestSessionId));
+        assertNotFound(get(baseUri, analysisPath + "/documents", sessionB, validGuestSessionId));
+        assertNotFound(get(baseUri, analysisPath + "/documents/" + referenceDocumentId,
+                sessionB, validGuestSessionId));
+        assertNotFound(uploadDocumentResponse(
+                baseUri, analysisId, sessionB, validGuestSessionId, "REFERENCE", validPdf("foreign")));
         assertNotFound(postWithoutBody(
                 baseUri, analysisPath + "/documents/detect-types", sessionB, validGuestSessionId));
         assertNotFound(postJson(
@@ -193,16 +360,61 @@ class ExtractionRegisteredOwnershipIntegrationIT {
         assertNotFound(postJson(
                 baseUri, path + "/confirm", sessionB, validGuestSessionId,
                 confirmationRequest(updatedReview)));
+        assertNotFound(get(baseUri, analysisPath + "/matches", sessionB, validGuestSessionId));
+        assertNotFound(patchJson(
+                baseUri, analysisPath + "/matches/" + UUID.randomUUID(), sessionB, validGuestSessionId,
+                """
+                {"expectedVersion":0,"action":"NO_MATCH"}
+                """));
+        assertNotFound(postWithoutBody(
+                baseUri, analysisPath + "/matches/confirm", sessionB, validGuestSessionId));
+        assertNotFound(postWithoutBody(
+                baseUri, analysisPath + "/reconcile", sessionB, validGuestSessionId));
+        assertNotFound(get(baseUri, analysisPath + "/reconciliation", sessionB, validGuestSessionId));
+        JsonNode discrepancy = reconciliation.get("discrepancies").get(0);
+        UUID discrepancyId = UUID.fromString(discrepancy.get("id").asString());
+        assertNotFound(patchJson(
+                baseUri, analysisPath + "/discrepancies/" + discrepancyId, sessionB, validGuestSessionId,
+                """
+                {"expectedVersion":0,"resolutionStatus":"ACCEPTED",
+                 "resolutionReason":"APPROVED_CHANGE","resolutionNote":null}
+                """));
+        assertNotFound(get(baseUri,
+                analysisPath + "/discrepancies/" + discrepancyId + "/evidence", sessionB, validGuestSessionId));
+        assertNotFound(postWithoutBody(
+                baseUri, analysisPath + "/report", sessionB, validGuestSessionId));
+        assertNotFound(get(baseUri, analysisPath + "/report", sessionB, validGuestSessionId));
+        assertNotFound(get(baseUri, analysisPath + "/export.csv", sessionB, validGuestSessionId));
+        assertNotFound(postWithoutBody(
+                baseUri, analysisPath + "/retry", sessionB, validGuestSessionId));
 
         assertEquals(storageCallsBeforeOtherUser, storageCallCounts(),
                 "ownership must be rejected before any storage operation");
+        assertEquals(reportCallsBeforeOtherUser, reportCallCounts(),
+                "ownership must be rejected before any report storage operation");
         assertEquals(classificationCallsBeforeOtherUser, intelligence.totalClassifyCalls(),
                 "ownership must be rejected before classification");
         assertEquals(extractionCallsBeforeOtherUser, intelligence.extractCalls(),
                 "ownership must be rejected before extraction");
+        assertEquals(guestLastSeenAtBefore, guestLastSeenAt(validGuestSessionId),
+                "authenticated identity must take precedence over the guest cookie");
+        assertEquals(guestSessionCountBefore, countGuestSessions());
     }
 
     private UUID uploadDocument(
+            URI baseUri,
+            UUID analysisId,
+            AuthenticatedSession session,
+            UUID guestSessionId,
+            String role,
+            byte[] pdf) throws Exception {
+        HttpResponse<String> response = uploadDocumentResponse(
+                baseUri, analysisId, session, guestSessionId, role, pdf);
+        assertEquals(201, response.statusCode(), response.body());
+        return UUID.fromString(objectMapper.readTree(response.body()).get("id").asString());
+    }
+
+    private HttpResponse<String> uploadDocumentResponse(
             URI baseUri,
             UUID analysisId,
             AuthenticatedSession session,
@@ -229,9 +441,7 @@ class ExtractionRegisteredOwnershipIntegrationIT {
                 .header("X-CSRF-TOKEN", session.csrf().token())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(multipart.toByteArray()))
                 .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(201, response.statusCode(), response.body());
-        return UUID.fromString(objectMapper.readTree(response.body()).get("id").asString());
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     private AuthenticatedSession login(URI baseUri, UserFixture user) throws Exception {
@@ -311,6 +521,18 @@ class ExtractionRegisteredOwnershipIntegrationIT {
         return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
+    private HttpResponse<String> patchJson(
+            URI baseUri,
+            String path,
+            AuthenticatedSession session,
+            UUID guestSessionId,
+            String body) throws Exception {
+        HttpRequest request = jsonRequest(baseUri, path, session, guestSessionId)
+                .method("PATCH", HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        return httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
     private HttpRequest.Builder jsonRequest(
             URI baseUri, String path, AuthenticatedSession session, UUID guestSessionId) {
         return HttpRequest.newBuilder(baseUri.resolve(path))
@@ -322,15 +544,18 @@ class ExtractionRegisteredOwnershipIntegrationIT {
 
     private String updatedReviewRequest(JsonNode review) throws Exception {
         return objectMapper.writeValueAsString(Map.of("documents", List.of(
-                updatedDocument(review.get("reference"), "QUOTE", "User-corrected reference line"),
-                updatedDocument(review.get("invoice"), "INVOICE", "User-corrected invoice line"))));
+                updatedDocument(review.get("reference"), "QUOTE",
+                        "Reference industrial fastener assembly", "REF-ITEM-101"),
+                updatedDocument(review.get("invoice"), "INVOICE",
+                        "Invoice cloud accounting subscription", "INV-ITEM-202"))));
     }
 
-    private static Map<String, Object> updatedDocument(JsonNode document, String confirmedType, String description) {
+    private static Map<String, Object> updatedDocument(
+            JsonNode document, String confirmedType, String description, String itemCode) {
         JsonNode line = document.get("lines").get(0);
         Map<String, Object> updatedLine = Map.of(
                 "id", line.get("id").asString(),
-                "itemCode", line.get("itemCode").asString(),
+                "itemCode", itemCode,
                 "description", description,
                 "quantity", line.get("quantity").decimalValue(),
                 "unit", line.get("unit").asString(),
@@ -371,6 +596,14 @@ class ExtractionRegisteredOwnershipIntegrationIT {
         return counts;
     }
 
+    private EnumMap<FakeReportStorage.Operation, Integer> reportCallCounts() {
+        EnumMap<FakeReportStorage.Operation, Integer> counts = new EnumMap<>(FakeReportStorage.Operation.class);
+        for (FakeReportStorage.Operation operation : FakeReportStorage.Operation.values()) {
+            counts.put(operation, reportStorage.operationCalls(operation));
+        }
+        return counts;
+    }
+
     private void assertNotFound(HttpResponse<String> response) {
         assertEquals(404, response.statusCode());
         assertEquals("application/json", response.headers().firstValue("Content-Type").orElseThrow().split(";", 2)[0]);
@@ -390,6 +623,13 @@ class ExtractionRegisteredOwnershipIntegrationIT {
 
     private long countGuestSessions() {
         return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM invoward.guest_sessions", Long.class);
+    }
+
+    private Instant guestLastSeenAt(UUID guestSessionId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT last_seen_at FROM invoward.guest_sessions WHERE id = ?",
+                (resultSet, rowNumber) -> resultSet.getTimestamp("last_seen_at").toInstant(),
+                guestSessionId);
     }
 
     private static byte[] validPdf(String title) throws Exception {
@@ -478,6 +718,18 @@ class ExtractionRegisteredOwnershipIntegrationIT {
         @Primary
         FakeDocumentIntelligence fakeDocumentIntelligence() {
             return new FakeDocumentIntelligence();
+        }
+
+        @Bean
+        @Primary
+        FakeReportStorage fakeReportStorage() {
+            return new FakeReportStorage();
+        }
+
+        @Bean
+        @Primary
+        ProcessingWakePort noOpProcessingWakePort() {
+            return analysisId -> { };
         }
     }
 

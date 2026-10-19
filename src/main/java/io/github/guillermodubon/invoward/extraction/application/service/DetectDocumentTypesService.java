@@ -1,7 +1,10 @@
 package io.github.guillermodubon.invoward.extraction.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.service.GetAnalysisService;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.document.application.exception.DocumentNotFoundException;
@@ -30,6 +33,7 @@ public class DetectDocumentTypesService {
             document -> document.role() == DocumentRole.REFERENCE ? 0 : 1);
 
     private final GetAnalysisService analysisService;
+    private final AnalysisJobRepository analysisJobRepository;
     private final DocumentRepository documentRepository;
     private final DocumentIntelligenceFileMaterializer fileMaterializer;
     private final DocumentIntelligence documentIntelligence;
@@ -39,6 +43,7 @@ public class DetectDocumentTypesService {
 
     public DetectDocumentTypesService(
             GetAnalysisService analysisService,
+            AnalysisJobRepository analysisJobRepository,
             DocumentRepository documentRepository,
             DocumentIntelligenceFileMaterializer fileMaterializer,
             DocumentIntelligence documentIntelligence,
@@ -46,6 +51,7 @@ public class DetectDocumentTypesService {
             CompleteDocumentClassificationTransaction completeTransaction,
             Clock clock) {
         this.analysisService = Objects.requireNonNull(analysisService);
+        this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
         this.documentRepository = Objects.requireNonNull(documentRepository);
         this.fileMaterializer = Objects.requireNonNull(fileMaterializer);
         this.documentIntelligence = Objects.requireNonNull(documentIntelligence);
@@ -59,29 +65,15 @@ public class DetectDocumentTypesService {
         Objects.requireNonNull(owner, "owner must not be null");
 
         Analysis analysis = analysisService.get(analysisId, owner);
+        requireActiveClassification(analysis, analysisId);
         List<Document> documents = requiredDocuments(analysisId);
-        if (analysis.status() == AnalysisStatus.CLASSIFYING) {
-            if (documents.stream().anyMatch(document -> document.detectedType() == null)) {
-                throw new DocumentClassificationConflictException();
-            }
-            return toResults(documents);
-        }
-        if (analysis.status() != AnalysisStatus.UPLOADING) {
-            throw new DocumentClassificationConflictException();
-        }
         requireNotExpired(documents, clock.instant());
 
         for (Document document : documents) {
             if (document.detectedType() != null) {
                 continue;
             }
-            Analysis latestAnalysis = analysisService.get(analysisId, owner);
-            if (latestAnalysis.status() == AnalysisStatus.CLASSIFYING) {
-                return completeTransaction.complete(owner, analysisId);
-            }
-            if (latestAnalysis.status() != AnalysisStatus.UPLOADING) {
-                throw new DocumentClassificationConflictException();
-            }
+            requireActiveClassification(analysisService.get(analysisId, owner), analysisId);
 
             Document current = documentRepository.findByIdAndAnalysisId(document.id(), analysisId)
                     .orElseThrow(DocumentNotFoundException::new);
@@ -98,6 +90,18 @@ public class DetectDocumentTypesService {
         }
 
         return completeTransaction.complete(owner, analysisId);
+    }
+
+    private void requireActiveClassification(Analysis analysis, UUID analysisId) {
+        if (analysis.status() != AnalysisStatus.CLASSIFYING) {
+            throw new DocumentClassificationConflictException();
+        }
+        AnalysisJob job = analysisJobRepository.findByAnalysisId(analysisId)
+                .orElseThrow(DocumentClassificationConflictException::new);
+        if (job.status() != AnalysisJobStatus.RUNNING
+                || job.currentStage() != AnalysisStatus.CLASSIFYING) {
+            throw new DocumentClassificationConflictException();
+        }
     }
 
     private List<Document> requiredDocuments(UUID analysisId) {
@@ -119,14 +123,4 @@ public class DetectDocumentTypesService {
         }
     }
 
-    private static List<DetectedDocumentType> toResults(List<Document> documents) {
-        return documents.stream()
-                .map(document -> {
-                    if (document.detectedType() == null) {
-                        throw new DocumentClassificationConflictException();
-                    }
-                    return new DetectedDocumentType(document.id(), document.role(), document.detectedType());
-                })
-                .toList();
-    }
 }

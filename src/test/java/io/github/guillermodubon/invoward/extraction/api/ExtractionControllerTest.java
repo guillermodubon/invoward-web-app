@@ -1,14 +1,16 @@
 package io.github.guillermodubon.invoward.extraction.api;
 
 import io.github.guillermodubon.invoward.analysis.api.AnalysisRequestOwnerResolver;
+import io.github.guillermodubon.invoward.analysis.application.model.AnalysisStatusSnapshot;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisJobStatus;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisOwner;
+import io.github.guillermodubon.invoward.analysis.domain.AnalysisStatus;
 import io.github.guillermodubon.invoward.analysis.domain.GuestSessionOwner;
-import io.github.guillermodubon.invoward.document.application.exception.DocumentStorageException;
 import io.github.guillermodubon.invoward.document.domain.DocumentRole;
 import io.github.guillermodubon.invoward.document.domain.DocumentType;
 import io.github.guillermodubon.invoward.extraction.application.exception.ConfirmedDocumentTypeInvalidException;
 import io.github.guillermodubon.invoward.extraction.application.exception.ExtractionAlreadyConfirmedException;
-import io.github.guillermodubon.invoward.extraction.application.exception.DocumentIntelligenceException;
+import io.github.guillermodubon.invoward.extraction.application.exception.DocumentsRequiredException;
 import io.github.guillermodubon.invoward.extraction.application.exception.DocumentTypesNotDetectedException;
 import io.github.guillermodubon.invoward.extraction.application.exception.ExtractionNotFoundException;
 import io.github.guillermodubon.invoward.extraction.application.exception.ExtractionConflictException;
@@ -18,7 +20,7 @@ import io.github.guillermodubon.invoward.extraction.application.model.Extraction
 import io.github.guillermodubon.invoward.extraction.application.model.ExtractionReviewUpdate;
 import io.github.guillermodubon.invoward.extraction.application.service.GetExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.service.ConfirmExtractionService;
-import io.github.guillermodubon.invoward.extraction.application.service.StartExtractionService;
+import io.github.guillermodubon.invoward.extraction.application.service.RequestExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.service.UpdateExtractionService;
 import io.github.guillermodubon.invoward.extraction.application.model.ExtractionConfirmation;
 import io.github.guillermodubon.invoward.extraction.domain.BoundingBox;
@@ -86,7 +88,7 @@ class ExtractionControllerTest {
              "invoiceDocumentId":"%s","invoiceExpectedVersion":4}
             """.formatted(REFERENCE_DOCUMENT_ID, INVOICE_DOCUMENT_ID);
 
-    private final StartExtractionService startService = mock(StartExtractionService.class);
+    private final RequestExtractionService requestService = mock(RequestExtractionService.class);
     private final GetExtractionService getService = mock(GetExtractionService.class);
     private final UpdateExtractionService updateService = mock(UpdateExtractionService.class);
     private final ConfirmExtractionService confirmService = mock(ConfirmExtractionService.class);
@@ -100,7 +102,7 @@ class ExtractionControllerTest {
         validator = new LocalValidatorFactoryBean();
         validator.afterPropertiesSet();
         mockMvc = standaloneSetup(new ExtractionController(
-                        startService, getService, updateService, confirmService, ownerResolver))
+                        requestService, getService, updateService, confirmService, ownerResolver))
                 .setControllerAdvice(new ExtractionExceptionHandler())
                 .setCustomArgumentResolvers(new AuthenticationPrincipalArgumentResolver())
                 .setValidator(validator)
@@ -174,35 +176,28 @@ class ExtractionControllerTest {
     }
 
     @Test
-    void returnsFullSafeDraftReviewAndRecordsGuestActivityOnlyAfterSuccess() throws Exception {
-        ExtractionReview review = review();
-        when(startService.start(eq(ANALYSIS_ID), eq(OWNER), any())).thenReturn(review);
+    void queuesExtractionAndReturnsNoStoreStatusLocationWithoutProviderResult() throws Exception {
+        when(requestService.request(eq(ANALYSIS_ID), eq(OWNER), any()))
+                .thenReturn(queuedExtractionSnapshot());
 
         String body = mockMvc.perform(post("/api/analyses/{analysisId}/extract", ANALYSIS_ID)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(REQUEST_BODY))
-                .andExpect(status().isOk())
+                .andExpect(status().isAccepted())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
                 .andExpect(header().string("Cache-Control", "no-store"))
-                .andExpect(jsonPath("$.reference.status").value("DRAFT"))
-                .andExpect(jsonPath("$.reference.role").value("REFERENCE"))
-                .andExpect(jsonPath("$.reference.confirmedType").value("PURCHASE_ORDER"))
-                .andExpect(jsonPath("$.reference.lines[0].id").value(REFERENCE_LINE_ID.toString()))
-                .andExpect(jsonPath("$.reference.lines[0].position").value(0))
-                .andExpect(jsonPath("$.reference.lines[0].boundingBox.xMin").value(0.1))
-                .andExpect(jsonPath("$.invoice.status").value("DRAFT"))
-                .andExpect(jsonPath("$.invoice.role").value("INVOICE"))
-                .andExpect(jsonPath("$.invoice.lines[0].id").value(INVOICE_LINE_ID.toString()))
+                .andExpect(header().string("Location", "/api/analyses/" + ANALYSIS_ID + "/status"))
+                .andExpect(jsonPath("$.analysisId").value(ANALYSIS_ID.toString()))
+                .andExpect(jsonPath("$.status").value("EXTRACTING"))
+                .andExpect(jsonPath("$.jobStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.currentStage").value("EXTRACTING"))
                 .andReturn().getResponse().getContentAsString();
 
         JsonNode response = objectMapper.readTree(body);
-        assertEquals(2, response.size());
-        assertFalse(body.contains("modelId"));
-        assertFalse(body.contains("extractorVersion"));
-        assertFalse(body.contains("storageKey"));
-        assertFalse(body.contains("sha256"));
+        assertEquals(8, response.size());
         assertFalse(body.contains(GUEST_ID.toString()));
-        verify(startService).start(eq(ANALYSIS_ID), eq(OWNER), any());
+        verify(requestService).request(eq(ANALYSIS_ID), eq(OWNER), any());
+        verifyNoInteractions(getService);
         verify(ownerResolver).recordSuccessfulActivity(OWNER);
     }
 
@@ -218,7 +213,7 @@ class ExtractionControllerTest {
                         {"code":"ANALYSIS_NOT_FOUND","message":"Analysis was not found."}
                         """));
 
-        verifyNoInteractions(startService);
+        verifyNoInteractions(requestService);
         verify(ownerResolver, never()).recordSuccessfulActivity(any(AnalysisOwner.class));
     }
 
@@ -248,20 +243,17 @@ class ExtractionControllerTest {
                         {"code":"INVALID_REQUEST","message":"The request is invalid."}
                         """));
 
-        verifyNoInteractions(startService);
+        verifyNoInteractions(requestService);
     }
 
     @Test
-    void mapsProviderStorageAndTypeFailuresToSafeErrors() throws Exception {
-        when(startService.start(eq(ANALYSIS_ID), eq(OWNER), any()))
-                .thenThrow(new DocumentIntelligenceException(DocumentIntelligenceException.Failure.RATE_LIMITED))
-                .thenThrow(new DocumentStorageException(DocumentStorageException.Failure.UNAVAILABLE))
+    void mapsQueuePrerequisiteAndTypeFailuresToSafeErrors() throws Exception {
+        when(requestService.request(eq(ANALYSIS_ID), eq(OWNER), any()))
+                .thenThrow(new DocumentsRequiredException())
                 .thenThrow(new DocumentTypesNotDetectedException())
                 .thenThrow(new ConfirmedDocumentTypeInvalidException());
 
-        assertSafeError(503, "AI_PROVIDER_UNAVAILABLE",
-                "Document intelligence is temporarily unavailable.");
-        assertSafeError(503, "DOCUMENT_STORAGE_UNAVAILABLE", "Document storage is unavailable.");
+        assertSafeError(409, "DOCUMENTS_REQUIRED", "A reference document and an invoice are required.");
         assertSafeError(409, "DOCUMENT_TYPES_NOT_DETECTED", "Document types must be detected before extraction.");
         assertSafeError(400, "VALIDATION_FAILED", "The request contains invalid data.");
 
@@ -348,13 +340,28 @@ class ExtractionControllerTest {
     }
 
     @Test
-    void confirmReturnsNoContentAndRecordsActivityOnlyAfterSuccess() throws Exception {
+    void confirmReturnsQueuedStatusAndRecordsActivityOnlyAfterSuccess() throws Exception {
+        when(confirmService.confirm(eq(ANALYSIS_ID), eq(OWNER), any(ExtractionConfirmation.class)))
+                .thenReturn(new AnalysisStatusSnapshot(
+                        ANALYSIS_ID,
+                        AnalysisStatus.MATCHING,
+                        AnalysisJobStatus.QUEUED,
+                        AnalysisStatus.MATCHING,
+                        false,
+                        null,
+                        null,
+                        Instant.parse("2026-10-05T00:00:00Z")));
+
         mockMvc.perform(post("/api/analyses/{analysisId}/extraction/confirm", ANALYSIS_ID)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(CONFIRM_REQUEST_BODY))
-                .andExpect(status().isNoContent())
+                .andExpect(status().isAccepted())
+                .andExpect(header().string("Location", "/api/analyses/" + ANALYSIS_ID + "/status"))
                 .andExpect(header().string("Cache-Control", "no-store"))
-                .andExpect(content().string(""));
+                .andExpect(jsonPath("$.analysisId").value(ANALYSIS_ID.toString()))
+                .andExpect(jsonPath("$.status").value("MATCHING"))
+                .andExpect(jsonPath("$.jobStatus").value("QUEUED"))
+                .andExpect(jsonPath("$.currentStage").value("MATCHING"));
 
         verify(confirmService).confirm(ANALYSIS_ID, OWNER,
                 new ExtractionConfirmation(REFERENCE_DOCUMENT_ID, 3, INVOICE_DOCUMENT_ID, 4));
@@ -490,6 +497,18 @@ class ExtractionControllerTest {
         assertFalse(body.contains("provider stack"));
         assertFalse(body.contains("api-key"));
         assertFalse(body.contains("secret"));
+    }
+
+    private static AnalysisStatusSnapshot queuedExtractionSnapshot() {
+        return new AnalysisStatusSnapshot(
+                ANALYSIS_ID,
+                AnalysisStatus.EXTRACTING,
+                AnalysisJobStatus.QUEUED,
+                AnalysisStatus.EXTRACTING,
+                false,
+                null,
+                null,
+                Instant.parse("2026-10-17T12:00:00Z"));
     }
 
     private static ExtractionReview review() {

@@ -27,9 +27,20 @@ class ModuleDependencyRulesTest {
                     "..extraction..",
                     "..reconciliation..",
                     "..reporting..",
+                    "..processing..",
                     "..sharing..",
                     "..notification.."
             );
+
+    private static final ArchRule BUSINESS_MODULES_MUST_NOT_DEPEND_ON_PROCESSING = noClasses()
+            .that().resideInAnyPackage(
+                    "..analysis..",
+                    "..document..",
+                    "..extraction..",
+                    "..reconciliation..",
+                    "..reporting..")
+            .should().dependOnClassesThat()
+            .resideInAPackage("..processing..");
 
     private static final ArchRule MODULES_MUST_BE_FREE_OF_CYCLES = slices()
             .matching(BASE_PACKAGE + ".(*)..")
@@ -43,5 +54,10 @@ class ModuleDependencyRulesTest {
     @Test
     void modulesMustBeFreeOfCycles() {
         MODULES_MUST_BE_FREE_OF_CYCLES.check(PRODUCTION_CLASSES);
+    }
+
+    @Test
+    void businessModulesMustNotDependOnProcessing() {
+        BUSINESS_MODULES_MUST_NOT_DEPEND_ON_PROCESSING.check(PRODUCTION_CLASSES);
     }
 }

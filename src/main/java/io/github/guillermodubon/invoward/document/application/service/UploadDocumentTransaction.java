@@ -2,6 +2,7 @@ package io.github.guillermodubon.invoward.document.application.service;
 
 import io.github.guillermodubon.invoward.analysis.application.exception.AnalysisNotFoundException;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisJobRepository;
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.analysis.application.port.AnalysisRepository;
 import io.github.guillermodubon.invoward.analysis.domain.Analysis;
 import io.github.guillermodubon.invoward.analysis.domain.AnalysisJob;
@@ -12,17 +13,20 @@ import io.github.guillermodubon.invoward.document.application.exception.Analysis
 import io.github.guillermodubon.invoward.document.application.exception.DocumentRoleAlreadyExistsException;
 import io.github.guillermodubon.invoward.document.application.port.DocumentRepository;
 import io.github.guillermodubon.invoward.document.domain.Document;
+import io.github.guillermodubon.invoward.document.domain.DocumentRole;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.UUID;
 
 /** Persists validated document metadata and upload state atomically in PostgreSQL. */
 public class UploadDocumentTransaction {
 
     private final AnalysisRepository analysisRepository;
     private final AnalysisJobRepository analysisJobRepository;
+    private final AnalysisProcessingSignalPublisher signalPublisher;
     private final DocumentRepository documentRepository;
     private final Clock clock;
     private final long maxCombinedSizeBytes;
@@ -30,11 +34,13 @@ public class UploadDocumentTransaction {
     public UploadDocumentTransaction(
             AnalysisRepository analysisRepository,
             AnalysisJobRepository analysisJobRepository,
+            AnalysisProcessingSignalPublisher signalPublisher,
             DocumentRepository documentRepository,
             Clock clock,
             long maxCombinedSizeBytes) {
         this.analysisRepository = Objects.requireNonNull(analysisRepository);
         this.analysisJobRepository = Objects.requireNonNull(analysisJobRepository);
+        this.signalPublisher = Objects.requireNonNull(signalPublisher);
         this.documentRepository = Objects.requireNonNull(documentRepository);
         this.clock = Objects.requireNonNull(clock);
         if (maxCombinedSizeBytes <= 0) {
@@ -58,13 +64,32 @@ public class UploadDocumentTransaction {
         validateCombinedSize(document);
 
         Document persistedDocument = documentRepository.create(document);
-        analysisRepository.update(analysis.transitionToUploading(now));
-
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysis.id())
                 .orElseThrow(() -> new IllegalStateException("Analysis job is missing"));
-        analysisJobRepository.update(job.awaitMoreUploads(now));
+
+        if (hasBothPrincipalDocuments(analysis.id())) {
+            analysisRepository.update(analysis.transitionToUploading(now).beginClassification(now));
+            analysisJobRepository.update(job.queueClassification(now));
+            signalPublisher.request(analysis.id());
+        } else {
+            analysisRepository.update(analysis.transitionToUploading(now));
+            analysisJobRepository.update(job.awaitMoreUploads(now));
+        }
 
         return persistedDocument;
+    }
+
+    private boolean hasBothPrincipalDocuments(UUID analysisId) {
+        boolean referencePresent = false;
+        boolean invoicePresent = false;
+        for (Document persisted : documentRepository.findByAnalysisId(analysisId)) {
+            if (persisted.role() == DocumentRole.REFERENCE) {
+                referencePresent = true;
+            } else if (persisted.role() == DocumentRole.INVOICE) {
+                invoicePresent = true;
+            }
+        }
+        return referencePresent && invoicePresent;
     }
 
     private static void validateUploadState(Analysis analysis) {

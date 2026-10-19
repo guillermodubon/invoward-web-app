@@ -143,11 +143,14 @@ class UpdateExtractionServiceIT {
         AnalysisOwner owner = new RegisteredUserOwner(userId);
         Analysis analysis = Analysis.create(UUID.randomUUID(), owner, PriceTolerance.exactMatch(), now)
                 .transitionToUploading(now)
-                .markClassifying(now);
+                .markClassifying(now)
+                .beginExtraction(now);
         analysisRepository.create(analysis);
         analysisJobRepository.create(AnalysisJob.waitingForUser(UUID.randomUUID(), analysis.id(), now)
                 .awaitMoreUploads(now)
-                .waitForUserAtClassification(now));
+                .waitForUserAtClassification(now)
+                .queueExtraction(now)
+                .startQueuedAttempt(now, 3));
 
         String keyPrefix = "update-extraction-test/" + UUID.randomUUID();
         Document reference = documentRepository.create(Document.createUploaded(

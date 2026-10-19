@@ -33,7 +33,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Authorizes, persists human type choices, then resolves and validates both provider drafts. */
+/** Prepares extraction drafts from confirmed types using the shared cache/provider path. */
 public final class PrepareExtractionService {
 
     private static final Comparator<Document> ROLE_ORDER = Comparator.comparingInt(
@@ -100,6 +100,47 @@ public final class PrepareExtractionService {
         }
 
         ExtractionDocumentPair confirmed = confirmTypesTransaction.confirm(analysisId, owner, requestedTypes);
+        return prepareConfirmed(confirmed);
+    }
+
+    /** Prepares the already-confirmed documents for the claimed extraction worker stage. */
+    public ExtractionPreparation.Ready prepareForWorker(UUID analysisId, AnalysisOwner owner) {
+        Objects.requireNonNull(analysisId, "analysisId must not be null");
+        Objects.requireNonNull(owner, "owner must not be null");
+
+        Analysis analysis = analysisService.get(analysisId, owner);
+        if (analysis.status() != AnalysisStatus.EXTRACTING) {
+            throw new AnalysisExtractionNotAllowedException();
+        }
+
+        List<Document> documents = requiredDocuments(analysisId);
+        Instant now = clock.instant();
+        requireActive(documents, now);
+        if (documents.stream().anyMatch(document -> document.detectedType() == null)) {
+            throw new DocumentTypesNotDetectedException();
+        }
+        if (documents.stream().anyMatch(document -> document.confirmedType() == null)) {
+            throw new ExtractionConflictException();
+        }
+
+        Optional<PersistedExtraction> referenceExisting = extractedDocumentRepository
+                .findByDocumentId(documents.get(0).id());
+        Optional<PersistedExtraction> invoiceExisting = extractedDocumentRepository
+                .findByDocumentId(documents.get(1).id());
+        if (referenceExisting.isPresent() || invoiceExisting.isPresent()) {
+            ExtractionPreparation existing = existingDraftOrConflict(
+                    documents.get(0), referenceExisting, documents.get(1), invoiceExisting);
+            if (existing instanceof ExtractionPreparation.ExistingDraft) {
+                // A completed pair and its workflow transition are one transaction; seeing drafts
+                // while the worker still owns EXTRACTING is inconsistent, so never duplicate them.
+                throw new ExtractionConflictException();
+            }
+        }
+
+        return prepareConfirmed(new ExtractionDocumentPair(documents.get(0), documents.get(1)));
+    }
+
+    private ExtractionPreparation.Ready prepareConfirmed(ExtractionDocumentPair confirmed) {
         if (modelId.isBlank() || modelId.length() > 120) {
             throw new DocumentIntelligenceException(DocumentIntelligenceException.Failure.UNAVAILABLE);
         }

@@ -14,6 +14,7 @@ import io.github.guillermodubon.invoward.document.application.port.DocumentRepos
 import io.github.guillermodubon.invoward.document.domain.Document;
 import io.github.guillermodubon.invoward.document.domain.DocumentRole;
 import io.github.guillermodubon.invoward.document.domain.DocumentType;
+import io.github.guillermodubon.invoward.extraction.application.exception.DocumentClassificationConflictException;
 import io.github.guillermodubon.invoward.extraction.application.exception.DocumentIntelligenceException;
 import io.github.guillermodubon.invoward.extraction.application.exception.DocumentIntelligenceException.Failure;
 import io.github.guillermodubon.invoward.extraction.application.model.DetectedDocumentType;
@@ -73,7 +74,7 @@ class DetectDocumentTypesServiceIT {
     }
 
     @Test
-    void classifiesTwoMissingDocumentsPersistsSuggestionsAndTransitionsAtomicallyThenIsIdempotent()
+    void classifiesTwoMissingDocumentsPersistsSuggestionsAndWaitsAtHumanGate()
             throws IOException {
         Fixture fixture = createAnalysisWithDocuments();
         intelligence.setClassification(fixture.reference().id(), DocumentType.QUOTE);
@@ -100,9 +101,8 @@ class DetectDocumentTypesServiceIT {
         assertNull(job.startedAt());
         assertNull(job.completedAt());
 
-        List<DetectedDocumentType> repeated = service.detect(fixture.analysis().id(), fixture.owner());
-
-        assertEquals(result, repeated);
+        assertThrows(DocumentClassificationConflictException.class,
+                () -> service.detect(fixture.analysis().id(), fixture.owner()));
         assertEquals(2, intelligence.totalClassifyCalls());
         assertEquals(2, storage.downloadCalls());
     }
@@ -122,12 +122,16 @@ class DetectDocumentTypesServiceIT {
                 fixture.reference().id(), fixture.analysis().id()).orElseThrow().detectedType());
         assertNull(documentRepository.findByIdAndAnalysisId(
                 fixture.invoice().id(), fixture.analysis().id()).orElseThrow().detectedType());
-        assertEquals(AnalysisStatus.UPLOADING, analysisRepository.findOwnedById(
+        assertEquals(AnalysisStatus.CLASSIFYING, analysisRepository.findOwnedById(
                 fixture.analysis().id(), fixture.owner(), clock.instant()).orElseThrow().status());
+        AnalysisJob runningJob = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
+        assertEquals(AnalysisJobStatus.RUNNING, runningJob.status());
+        assertEquals(AnalysisStatus.CLASSIFYING, runningJob.currentStage());
         assertEquals(1, intelligence.classifyCalls(fixture.reference().id()));
         assertEquals(1, intelligence.classifyCalls(fixture.invoice().id()));
 
         intelligence.clearClassificationFailure(fixture.invoice().id());
+        failAndReclaimClassification(fixture);
         service.detect(fixture.analysis().id(), fixture.owner());
 
         assertEquals(1, intelligence.classifyCalls(fixture.reference().id()));
@@ -153,9 +157,13 @@ class DetectDocumentTypesServiceIT {
         UUID userId = jdbcTemplate.execute((ConnectionCallback<UUID>) DatabaseFixtures::insertUser);
         AnalysisOwner owner = new RegisteredUserOwner(userId);
         Analysis analysis = analysisRepository.create(Analysis.create(
-                UUID.randomUUID(), owner, PriceTolerance.exactMatch(), now).transitionToUploading(now));
-        analysisJobRepository.create(AnalysisJob.waitingForUser(UUID.randomUUID(), analysis.id(), now)
-                .awaitMoreUploads(now));
+                UUID.randomUUID(), owner, PriceTolerance.exactMatch(), now)
+                .transitionToUploading(now).markClassifying(now));
+        AnalysisJob job = AnalysisJob.waitingForUser(UUID.randomUUID(), analysis.id(), now)
+                .awaitMoreUploads(now)
+                .queueClassification(now)
+                .startQueuedAttempt(now, 3);
+        analysisJobRepository.create(job);
 
         String keyPrefix = "ai-detection-test/" + UUID.randomUUID();
         Document reference = createDocument(
@@ -163,6 +171,37 @@ class DetectDocumentTypesServiceIT {
         Document invoice = createDocument(
                 analysis.id(), DocumentRole.INVOICE, keyPrefix + "/invoice", now);
         return new Fixture(analysis, owner, reference, invoice);
+    }
+
+    private void failAndReclaimClassification(Fixture fixture) {
+        Instant failedAt = clock.instant();
+        Analysis analysis = analysisRepository.findOwnedById(
+                fixture.analysis().id(), fixture.owner(), failedAt).orElseThrow();
+        AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
+        analysisRepository.update(analysis.failProcessing(
+                AnalysisStatus.CLASSIFYING,
+                "AI_PROVIDER_UNAVAILABLE",
+                "Document classification is temporarily unavailable.",
+                true,
+                failedAt));
+        AnalysisJob failedJob = job.failCurrentAttempt(
+                "AI_PROVIDER_UNAVAILABLE", "Document classification provider unavailable.", true, 3, failedAt);
+        analysisJobRepository.update(failedJob);
+
+        Analysis failedAnalysis = analysisRepository.findOwnedById(
+                fixture.analysis().id(), fixture.owner(), clock.instant()).orElseThrow();
+        AnalysisJob persistedFailedJob = analysisJobRepository.findByAnalysisId(
+                fixture.analysis().id()).orElseThrow();
+        Instant retryAt = clock.instant();
+        if (retryAt.isBefore(failedAnalysis.updatedAt())) {
+            retryAt = failedAnalysis.updatedAt();
+        }
+        if (retryAt.isBefore(persistedFailedJob.updatedAt())) {
+            retryAt = persistedFailedJob.updatedAt();
+        }
+        analysisRepository.update(failedAnalysis.retryProcessing(AnalysisStatus.CLASSIFYING, retryAt));
+        AnalysisJob queued = analysisJobRepository.update(persistedFailedJob.retryFailedStage(retryAt, 3));
+        analysisJobRepository.update(queued.startQueuedAttempt(retryAt, 3));
     }
 
     private Document createDocument(UUID analysisId, DocumentRole role, String storageKey, Instant now)

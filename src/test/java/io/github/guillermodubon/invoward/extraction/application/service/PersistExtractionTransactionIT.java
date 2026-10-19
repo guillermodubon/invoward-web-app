@@ -117,7 +117,7 @@ class PersistExtractionTransactionIT {
                 fixture.analysis().id(), fixture.owner(), clock.instant()).orElseThrow();
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
         assertEquals(AnalysisStatus.AWAITING_CONFIRMATION, analysis.status());
-        assertEquals(AnalysisStatus.CLASSIFYING, fixture.analysis().status());
+        assertEquals(AnalysisStatus.EXTRACTING, fixture.analysis().status());
         assertNull(analysis.difference());
         assertFalse(analysis.retryable());
         assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
@@ -149,11 +149,11 @@ class PersistExtractionTransactionIT {
                         + "JOIN invoward.extracted_documents ed ON ed.id = li.extracted_document_id "
                         + "JOIN invoward.documents d ON d.id = ed.document_id WHERE d.analysis_id = ?",
                 Integer.class, fixture.analysis().id()));
-        assertEquals(AnalysisStatus.CLASSIFYING, analysisRepository.findOwnedById(
+        assertEquals(AnalysisStatus.EXTRACTING, analysisRepository.findOwnedById(
                 fixture.analysis().id(), fixture.owner(), clock.instant()).orElseThrow().status());
         AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
-        assertEquals(AnalysisJobStatus.WAITING_FOR_USER, job.status());
-        assertEquals(AnalysisStatus.CLASSIFYING, job.currentStage());
+        assertEquals(AnalysisJobStatus.RUNNING, job.status());
+        assertEquals(AnalysisStatus.EXTRACTING, job.currentStage());
     }
 
     @Test
@@ -169,23 +169,35 @@ class PersistExtractionTransactionIT {
 
         assertTrue(extractedDocumentRepository.findByDocumentId(fixture.reference().id()).isPresent());
         assertTrue(extractedDocumentRepository.findByDocumentId(fixture.invoice().id()).isEmpty());
-        assertEquals(AnalysisStatus.CLASSIFYING, analysisRepository.findOwnedById(
+        assertEquals(AnalysisStatus.EXTRACTING, analysisRepository.findOwnedById(
                 fixture.analysis().id(), fixture.owner(), clock.instant()).orElseThrow().status());
-        assertEquals(AnalysisStatus.CLASSIFYING, analysisJobRepository.findByAnalysisId(
-                fixture.analysis().id()).orElseThrow().currentStage());
+        AnalysisJob job = analysisJobRepository.findByAnalysisId(fixture.analysis().id()).orElseThrow();
+        assertEquals(AnalysisJobStatus.RUNNING, job.status());
+        assertEquals(AnalysisStatus.EXTRACTING, job.currentStage());
     }
 
     private Fixture createFixture() {
         Instant now = clock.instant();
         UUID userId = jdbcTemplate.execute((ConnectionCallback<UUID>) DatabaseFixtures::insertUser);
         AnalysisOwner owner = new RegisteredUserOwner(userId);
+        Instant classificationQueuedAt = now.plusSeconds(1);
+        Instant classificationStartedAt = now.plusSeconds(2);
+        Instant classificationFinishedAt = now.plusSeconds(3);
+        Instant extractionQueuedAt = now.plusSeconds(4);
+        Instant extractionStartedAt = now.plusSeconds(5);
         Analysis analysis = Analysis.create(UUID.randomUUID(), owner, PriceTolerance.exactMatch(), now)
                 .transitionToUploading(now)
-                .markClassifying(now);
+                .markClassifying(classificationQueuedAt)
+                .beginExtraction(extractionQueuedAt);
         analysisRepository.create(analysis);
-        analysisJobRepository.create(AnalysisJob.waitingForUser(UUID.randomUUID(), analysis.id(), now)
+        AnalysisJob job = AnalysisJob.waitingForUser(UUID.randomUUID(), analysis.id(), now)
                 .awaitMoreUploads(now)
-                .waitForUserAtClassification(now));
+                .queueClassification(classificationQueuedAt)
+                .startQueuedAttempt(classificationStartedAt, 3)
+                .finishClassificationAwaitingUser(classificationFinishedAt)
+                .queueExtraction(extractionQueuedAt)
+                .startQueuedAttempt(extractionStartedAt, 3);
+        analysisJobRepository.create(job);
 
         String keyPrefix = "persist-extraction-test/" + UUID.randomUUID();
         Document reference = documentRepository.create(Document.createUploaded(
