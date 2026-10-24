@@ -54,9 +54,8 @@ public class UploadDocumentTransaction {
         Objects.requireNonNull(owner, "owner must not be null");
         Objects.requireNonNull(document, "document must not be null");
 
-        Instant now = clock.instant();
         Analysis analysis = analysisRepository.findOwnedByIdForUpdate(
-                        document.analysisId(), owner, now)
+                        document.analysisId(), owner, clock.instant())
                 .orElseThrow(AnalysisNotFoundException::new);
         validateUploadState(analysis);
         validateDocumentExpiry(analysis, document);
@@ -67,6 +66,8 @@ public class UploadDocumentTransaction {
         AnalysisJob job = analysisJobRepository.findJobByAnalysisIdForUpdate(analysis.id())
                 .orElseThrow(() -> new IllegalStateException("Analysis job is missing"));
 
+        // A competing upload may update both aggregates while this request waits for their locks.
+        Instant now = clock.instant();
         if (hasBothPrincipalDocuments(analysis.id())) {
             analysisRepository.update(analysis.transitionToUploading(now).beginClassification(now));
             analysisJobRepository.update(job.queueClassification(now));

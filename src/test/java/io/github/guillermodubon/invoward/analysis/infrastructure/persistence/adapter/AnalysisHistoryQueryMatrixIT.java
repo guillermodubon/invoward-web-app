@@ -15,9 +15,11 @@ import io.github.guillermodubon.invoward.analysis.domain.PriceTolerance;
 import io.github.guillermodubon.invoward.analysis.domain.RegisteredUserOwner;
 import io.github.guillermodubon.invoward.support.database.DatabaseFixtures;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
+import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
-import org.hibernate.SessionFactory;
-import org.hibernate.stat.Statistics;
+import jakarta.persistence.PersistenceContext;
+import org.hibernate.Session;
+import org.hibernate.SessionEventListener;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -33,7 +35,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,6 +58,9 @@ class AnalysisHistoryQueryMatrixIT {
 
     @Autowired
     private EntityManagerFactory entityManagerFactory;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
@@ -135,25 +139,26 @@ class AnalysisHistoryQueryMatrixIT {
                     "COMPLETED", "PENDING", "USD", new BigDecimal("1.0000"), MATCHING_DISCREPANCY));
         }
 
-        SessionFactory sessionFactory = entityManagerFactory.unwrap(SessionFactory.class);
-        Statistics statistics = sessionFactory.getStatistics();
-        boolean statisticsWereEnabled = statistics.isStatisticsEnabled();
-        statistics.setStatisticsEnabled(true);
-        statistics.clear();
-        try {
-            AnalysisHistoryPage result = historyQueryRepository.findForRegisteredUser(ownerId, queryByDiscrepancy());
+        entityManager.flush();
+        entityManager.clear();
+        Session historySession = entityManager.unwrap(Session.class);
+        StatementCounter statementCounter = new StatementCounter();
+        historySession.addEventListeners(statementCounter);
 
-            assertEquals(20, result.content().size());
-            assertEquals(25, result.totalElements());
-            assertEquals(2, result.totalPages());
-            assertTrue(matchingIds.containsAll(result.content().stream().map(item -> item.id()).toList()));
-            assertEquals(2, statistics.getQueryExecutionCount(), "The page and count should be the only queries.");
-            assertEquals(2, statistics.getPrepareStatementCount(), "No per-Analysis child query should execute.");
-            assertEquals(0, statistics.getEntityLoadCount(), "The read should use its scalar DTO projection.");
-        } finally {
-            statistics.clear();
-            statistics.setStatisticsEnabled(statisticsWereEnabled);
+        // Other sessions must not inflate the budget of this read (for example, processing workers).
+        try (var unrelatedSession = entityManagerFactory.createEntityManager()) {
+            unrelatedSession.createQuery(
+                    "select count(analysis) from AnalysisJpaEntity analysis", Long.class).getSingleResult();
         }
+        AnalysisHistoryPage result = historyQueryRepository.findForRegisteredUser(ownerId, queryByDiscrepancy());
+
+        assertEquals(20, result.content().size());
+        assertEquals(25, result.totalElements());
+        assertEquals(2, result.totalPages());
+        assertTrue(matchingIds.containsAll(result.content().stream().map(item -> item.id()).toList()));
+        assertEquals(2, statementCounter.preparedStatementCount, "The page and count should be the only statements.");
+        assertEquals(0, historySession.getStatistics().getEntityCount(), "The read should use its scalar DTO projection.");
+        assertEquals(0, historySession.getStatistics().getCollectionCount(), "No child collection should be loaded.");
     }
 
     private UUID createRegisteredAnalysis(
@@ -219,5 +224,14 @@ class AnalysisHistoryQueryMatrixIT {
         return AnalysisHistoryQuery.of(
                 0, 20, null, null, null, null, null, HistoryDiscrepancyType.UNIT_PRICE_MISMATCH,
                 null, null, null, null, null, null);
+    }
+
+    private static final class StatementCounter implements SessionEventListener {
+        private int preparedStatementCount;
+
+        @Override
+        public void jdbcPrepareStatementStart() {
+            preparedStatementCount++;
+        }
     }
 }
