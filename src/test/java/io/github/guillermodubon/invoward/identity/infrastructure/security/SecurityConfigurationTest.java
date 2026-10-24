@@ -266,6 +266,12 @@ class SecurityConfigurationTest {
                         {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
                         """))
                 .andExpect(result -> assertNull(result.getRequest().getSession(false)));
+        mockMvc.perform(get("/api/analyses").param("userId", UUID.randomUUID().toString()))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(content().json("""
+                        {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
+                        """));
         mockMvc.perform(get("/api/private/unlisted"))
                 .andExpect(status().isUnauthorized());
     }
