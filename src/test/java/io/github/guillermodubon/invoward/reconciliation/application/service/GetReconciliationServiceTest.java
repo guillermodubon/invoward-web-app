@@ -273,7 +273,7 @@ class GetReconciliationServiceTest {
 
     private static Analysis withStatus(Analysis analysis, AnalysisStatus status) {
         return new Analysis(
-                analysis.id(), analysis.owner(), status, analysis.reviewStatus(), analysis.reconciliationStatus(),
+                analysis.id(), analysis.owner(), status, analysis.reviewStatus(), analysis.reviewedAt(), analysis.reconciliationStatus(),
                 analysis.supplierName(), analysis.supplierKey(), analysis.referenceType(), analysis.referenceNumber(),
                 analysis.invoiceNumber(), analysis.currency(), analysis.referenceTotal(), analysis.invoicedTotal(),
                 analysis.difference(), analysis.priceTolerance(), analysis.retryable(), analysis.failureCode(),

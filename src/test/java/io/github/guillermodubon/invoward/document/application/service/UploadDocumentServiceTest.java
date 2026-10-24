@@ -249,6 +249,7 @@ class UploadDocumentServiceTest {
                 analysis.owner(),
                 status,
                 AnalysisReviewStatus.PENDING,
+                analysis.reviewedAt(),
                 analysis.reconciliationStatus(),
                 analysis.supplierName(),
                 analysis.supplierKey(),

@@ -117,6 +117,7 @@ class AnalysisControllerTest {
                 .andExpect(jsonPath("$.id").value(analysis.id().toString()))
                 .andExpect(jsonPath("$.status").value("CREATED"))
                 .andExpect(jsonPath("$.reviewStatus").value("PENDING"))
+                .andExpect(jsonPath("$.reviewedAt").doesNotExist())
                 .andExpect(jsonPath("$.reconciliationStatus").doesNotExist())
                 .andExpect(jsonPath("$.priceTolerancePercent").value(3))
                 .andExpect(jsonPath("$.priceToleranceAbsolute").value(12.34))
@@ -278,7 +279,7 @@ class AnalysisControllerTest {
         org.junit.jupiter.api.Assertions.assertFalse(body.contains("version"));
         org.junit.jupiter.api.Assertions.assertFalse(body.contains("guestSessionId"));
         org.junit.jupiter.api.Assertions.assertFalse(body.contains("lastErrorMessage"));
-        assertEquals(Set.of("id", "status", "reviewStatus", "reconciliationStatus", "supplierName",
+        assertEquals(Set.of("id", "status", "reviewStatus", "reviewedAt", "reconciliationStatus", "supplierName",
                         "referenceType", "referenceNumber", "invoiceNumber", "currency", "referenceTotal",
                         "invoicedTotal", "difference", "priceTolerancePercent", "priceToleranceAbsolute",
                         "retryable", "failureCode", "failureMessage", "createdAt", "updatedAt", "completedAt",
@@ -304,6 +305,7 @@ class AnalysisControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.id").value(analysisId.toString()))
                 .andExpect(jsonPath("$.supplierName").value("Northwind Supplies"))
+                .andExpect(jsonPath("$.reviewedAt").doesNotExist())
                 .andExpect(jsonPath("$.expiresAt").value(owner.expiresAt().toString()))
                 .andExpect(header().doesNotExist(HttpHeaders.SET_COOKIE))
                 .andReturn()
@@ -443,6 +445,7 @@ class AnalysisControllerTest {
                 owner,
                 AnalysisStatus.CREATED,
                 AnalysisReviewStatus.PENDING,
+                null,
                 null,
                 "Northwind Supplies",
                 "private-supplier-key",

@@ -200,7 +200,7 @@ class QueueDocumentTypeDetectionTransactionTest {
     }
 
     private static Analysis withStatus(Analysis source, AnalysisStatus status) {
-        return new Analysis(source.id(), source.owner(), status, source.reviewStatus(), source.reconciliationStatus(),
+        return new Analysis(source.id(), source.owner(), status, source.reviewStatus(), source.reviewedAt(), source.reconciliationStatus(),
                 source.supplierName(), source.supplierKey(), source.referenceType(), source.referenceNumber(),
                 source.invoiceNumber(), source.currency(), source.referenceTotal(), source.invoicedTotal(),
                 source.difference(), source.priceTolerance(), source.retryable(), source.failureCode(),

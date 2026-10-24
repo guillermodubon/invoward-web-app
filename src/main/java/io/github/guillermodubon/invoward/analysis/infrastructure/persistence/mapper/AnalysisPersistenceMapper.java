@@ -31,6 +31,7 @@ public class AnalysisPersistenceMapper {
         mapOwner(analysis.owner(), entity);
         entity.setStatus(analysis.status());
         entity.setReviewStatus(analysis.reviewStatus());
+        entity.setReviewedAt(analysis.reviewedAt());
         entity.setReconciliationStatus(analysis.reconciliationStatus());
         entity.setSupplierName(analysis.supplierName());
         entity.setSupplierKey(analysis.supplierKey());
@@ -60,6 +61,7 @@ public class AnalysisPersistenceMapper {
                 owner,
                 entity.getStatus(),
                 entity.getReviewStatus(),
+                entity.getReviewedAt(),
                 entity.getReconciliationStatus(),
                 entity.getSupplierName(),
                 entity.getSupplierKey(),

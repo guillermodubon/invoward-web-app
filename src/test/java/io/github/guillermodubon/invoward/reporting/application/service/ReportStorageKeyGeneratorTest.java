@@ -59,6 +59,7 @@ class ReportStorageKeyGeneratorTest {
                 owner,
                 AnalysisStatus.GENERATING_REPORT,
                 AnalysisReviewStatus.REVIEWED,
+                null,
                 AnalysisReconciliationStatus.MATCHED,
                 null, null, null, null, null, null, null, null, null,
                 new PriceTolerance(java.math.BigDecimal.ZERO, null), false, null, null,

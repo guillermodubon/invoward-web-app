@@ -24,6 +24,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -247,6 +248,7 @@ class AnalysisPersistenceIT {
                 owner,
                 AnalysisStatus.FAILED,
                 AnalysisReviewStatus.REVIEWED,
+                NOW.plusSeconds(30),
                 AnalysisReconciliationStatus.MATCHED,
                 "Northwind Supplies",
                 "northwind supplies",
@@ -270,6 +272,33 @@ class AnalysisPersistenceIT {
         analysisRepository.create(analysis);
 
         assertEquals(analysis, analysisRepository.findOwnedById(analysis.id(), owner, NOW).orElseThrow());
+        assertEquals(NOW.plusSeconds(30), jdbcTemplate.queryForObject(
+                "SELECT reviewed_at FROM invoward.analyses WHERE id = ?", Timestamp.class, analysis.id()).toInstant());
+    }
+
+    @Test
+    void mapperRoundTripsLegacyReviewedAnalysisWithoutInventingItsTimestamp() throws Exception {
+        RegisteredUserOwner owner = new RegisteredUserOwner(insertUser());
+        Instant completedAt = NOW.plusSeconds(60);
+        Analysis legacy = new Analysis(
+                UUID.randomUUID(),
+                owner,
+                AnalysisStatus.COMPLETED,
+                AnalysisReviewStatus.REVIEWED,
+                null,
+                AnalysisReconciliationStatus.MATCHED,
+                null, null, null, null, null, null,
+                null, null, null,
+                PriceTolerance.exactMatch(),
+                false, null, null, 0,
+                completedAt, null, NOW, completedAt);
+
+        Analysis persisted = analysisRepository.create(legacy);
+
+        assertEquals(legacy, persisted);
+        Analysis loaded = analysisRepository.findOwnedById(legacy.id(), owner, NOW).orElseThrow();
+        assertEquals(legacy, loaded);
+        assertNull(loaded.reviewedAt());
     }
 
     private UUID insertUser() throws Exception {

@@ -9,6 +9,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -24,6 +25,7 @@ class AnalysisTest {
 
         assertEquals(AnalysisStatus.CREATED, analysis.status());
         assertEquals(AnalysisReviewStatus.PENDING, analysis.reviewStatus());
+        assertNull(analysis.reviewedAt());
         assertNull(analysis.reconciliationStatus());
         assertNull(analysis.supplierName());
         assertNull(analysis.supplierKey());
@@ -365,6 +367,7 @@ class AnalysisTest {
         assertEquals(before.id(), completed.id());
         assertEquals(before.owner(), completed.owner());
         assertEquals(before.reviewStatus(), completed.reviewStatus());
+        assertEquals(before.reviewedAt(), completed.reviewedAt());
         assertEquals(before.reconciliationStatus(), completed.reconciliationStatus());
         assertEquals(before.supplierName(), completed.supplierName());
         assertEquals(before.supplierKey(), completed.supplierKey());
@@ -379,6 +382,101 @@ class AnalysisTest {
         assertEquals(before.version(), completed.version());
         assertEquals(before.expiresAt(), completed.expiresAt());
         assertEquals(before.createdAt(), completed.createdAt());
+    }
+
+    @Test
+    void completedRegisteredAnalysisCanBeMarkedReviewedAndReverted() {
+        Analysis completed = completedAnalysis();
+        Instant reviewedAt = completed.updatedAt().plusSeconds(1);
+
+        Analysis reviewed = completed.changeReviewStatus(AnalysisReviewStatus.REVIEWED, reviewedAt);
+
+        assertEquals(AnalysisReviewStatus.REVIEWED, reviewed.reviewStatus());
+        assertEquals(reviewedAt, reviewed.reviewedAt());
+        assertEquals(reviewedAt, reviewed.updatedAt());
+        assertEquals(completed.completedAt(), reviewed.completedAt());
+        assertEquals(completed.version(), reviewed.version());
+
+        Instant revertedAt = reviewedAt.plusSeconds(1);
+        Analysis pending = reviewed.changeReviewStatus(AnalysisReviewStatus.PENDING, revertedAt);
+
+        assertEquals(AnalysisReviewStatus.PENDING, pending.reviewStatus());
+        assertNull(pending.reviewedAt());
+        assertEquals(revertedAt, pending.updatedAt());
+        assertEquals(completed.completedAt(), pending.completedAt());
+        assertEquals(completed.version(), pending.version());
+    }
+
+    @Test
+    void reviewStatusSameValueIsNoOpAndLegacyReviewedNullTimestampRemainsUnknown() {
+        Analysis completed = completedAnalysis();
+
+        assertSame(completed, completed.changeReviewStatus(
+                AnalysisReviewStatus.PENDING, completed.updatedAt().plusSeconds(10)));
+        Analysis legacyReviewed = withReviewState(
+                completed, AnalysisReviewStatus.REVIEWED, null, completed.updatedAt());
+
+        assertSame(legacyReviewed, legacyReviewed.changeReviewStatus(
+                AnalysisReviewStatus.REVIEWED, completed.updatedAt().plusSeconds(10)));
+        assertNull(legacyReviewed.reviewedAt());
+        assertEquals(completed.updatedAt(), legacyReviewed.updatedAt());
+    }
+
+    @Test
+    void reviewTimestampIsPreservedByTheExistingProcessingStateMachine() {
+        Instant legacyReviewTime = NOW.plusSeconds(1);
+        Analysis reviewed = withReviewState(
+                Analysis.create(UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW),
+                AnalysisReviewStatus.REVIEWED, legacyReviewTime, legacyReviewTime);
+
+        Analysis completed = reviewed.transitionToUploading(NOW.plusSeconds(2))
+                .beginClassification(NOW.plusSeconds(3))
+                .beginExtraction(NOW.plusSeconds(4))
+                .awaitExtractionConfirmation(NOW.plusSeconds(5))
+                .confirmExtraction("PURCHASE_ORDER", "PO-1", "INV-1", "Acme Parts", "USD",
+                        BigDecimal.TEN, BigDecimal.TEN, NOW.plusSeconds(6))
+                .awaitMatchReview(NOW.plusSeconds(7))
+                .beginReconciliation(NOW.plusSeconds(8))
+                .completeReconciliation(AnalysisReconciliationStatus.MATCHED, BigDecimal.ZERO, NOW.plusSeconds(9))
+                .completeReportGeneration(NOW.plusSeconds(10));
+
+        assertEquals(AnalysisStatus.COMPLETED, completed.status());
+        assertEquals(AnalysisReviewStatus.REVIEWED, completed.reviewStatus());
+        assertEquals(legacyReviewTime, completed.reviewedAt());
+    }
+
+    @Test
+    void reviewStatusChangeRequiresCompletedRegisteredAnalysisAndValidArguments() {
+        Analysis incomplete = Analysis.create(
+                UUID.randomUUID(), new RegisteredUserOwner(UUID.randomUUID()), EXACT, NOW);
+        Analysis guest = Analysis.create(
+                UUID.randomUUID(), GuestSessionOwner.create(UUID.randomUUID(), NOW.plusSeconds(100), NOW), EXACT, NOW);
+
+        assertThrows(IllegalStateException.class,
+                () -> incomplete.changeReviewStatus(AnalysisReviewStatus.REVIEWED, NOW.plusSeconds(1)));
+        assertThrows(IllegalStateException.class,
+                () -> guest.changeReviewStatus(AnalysisReviewStatus.REVIEWED, NOW.plusSeconds(1)));
+        assertThrows(NullPointerException.class,
+                () -> completedAnalysis().changeReviewStatus(null, NOW.plusSeconds(1)));
+        assertThrows(NullPointerException.class,
+                () -> completedAnalysis().changeReviewStatus(AnalysisReviewStatus.REVIEWED, null));
+        assertThrows(IllegalArgumentException.class,
+                () -> completedAnalysis().changeReviewStatus(AnalysisReviewStatus.REVIEWED, NOW));
+    }
+
+    @Test
+    void reviewedAtMustFitReviewStatusAndAggregateTimestampRange() {
+        Analysis completed = completedAnalysis();
+
+        assertThrows(IllegalArgumentException.class,
+                () -> withReviewState(completed, AnalysisReviewStatus.PENDING,
+                        completed.updatedAt(), completed.updatedAt()));
+        assertThrows(IllegalArgumentException.class,
+                () -> withReviewState(completed, AnalysisReviewStatus.REVIEWED,
+                        completed.createdAt().minusSeconds(1), completed.updatedAt()));
+        assertThrows(IllegalArgumentException.class,
+                () -> withReviewState(completed, AnalysisReviewStatus.REVIEWED,
+                        completed.updatedAt().plusSeconds(1), completed.updatedAt()));
     }
 
     @Test
@@ -483,7 +581,7 @@ class AnalysisTest {
             long version) {
         return new Analysis(
                 UUID.randomUUID(), owner, AnalysisStatus.CREATED, AnalysisReviewStatus.PENDING, null,
-                null, null, null, null, null, null,
+                null, null, null, null, null, null, null,
                 referenceTotal, invoicedTotal, difference, EXACT,
                 false, null, null, version, completedAt, expiresAt, createdAt, updatedAt);
     }
@@ -497,10 +595,31 @@ class AnalysisTest {
                         new BigDecimal("100.0000"), new BigDecimal("100.0000"), NOW.plusSeconds(4));
     }
 
+    private static Analysis completedAnalysis() {
+        return matchingAnalysis()
+                .beginReconciliation(NOW.plusSeconds(5))
+                .completeReconciliation(AnalysisReconciliationStatus.MATCHED, BigDecimal.ZERO, NOW.plusSeconds(6))
+                .completeReportGeneration(NOW.plusSeconds(7));
+    }
+
+    private static Analysis withReviewState(
+            Analysis source,
+            AnalysisReviewStatus reviewStatus,
+            Instant reviewedAt,
+            Instant updatedAt) {
+        return new Analysis(
+                source.id(), source.owner(), source.status(), reviewStatus, reviewedAt,
+                source.reconciliationStatus(), source.supplierName(), source.supplierKey(),
+                source.referenceType(), source.referenceNumber(), source.invoiceNumber(), source.currency(),
+                source.referenceTotal(), source.invoicedTotal(), source.difference(), source.priceTolerance(),
+                source.retryable(), source.failureCode(), source.failureUserMessage(), source.version(),
+                source.completedAt(), source.expiresAt(), source.createdAt(), updatedAt);
+    }
+
     private static Analysis withStatus(Analysis analysis, AnalysisStatus status) {
         return new Analysis(
                 analysis.id(), analysis.owner(), status, analysis.reviewStatus(),
-                analysis.reconciliationStatus(), analysis.supplierName(), analysis.supplierKey(),
+                analysis.reviewedAt(), analysis.reconciliationStatus(), analysis.supplierName(), analysis.supplierKey(),
                 analysis.referenceType(), analysis.referenceNumber(), analysis.invoiceNumber(),
                 analysis.currency(), analysis.referenceTotal(), analysis.invoicedTotal(),
                 analysis.difference(), analysis.priceTolerance(), analysis.retryable(),

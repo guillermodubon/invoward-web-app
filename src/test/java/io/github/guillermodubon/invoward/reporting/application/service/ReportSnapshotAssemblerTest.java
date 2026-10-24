@@ -166,6 +166,7 @@ class ReportSnapshotAssemblerTest {
                 new RegisteredUserOwner(PRIVATE_USER_ID),
                 AnalysisStatus.GENERATING_REPORT,
                 AnalysisReviewStatus.REVIEWED,
+                null,
                 AnalysisReconciliationStatus.REVIEW_REQUIRED,
                 "Supplier Example",
                 supplierKey,

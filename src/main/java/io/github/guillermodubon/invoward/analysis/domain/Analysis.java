@@ -13,6 +13,7 @@ public record Analysis(
         AnalysisOwner owner,
         AnalysisStatus status,
         AnalysisReviewStatus reviewStatus,
+        Instant reviewedAt,
         AnalysisReconciliationStatus reconciliationStatus,
         String supplierName,
         String supplierKey,
@@ -53,6 +54,12 @@ public record Analysis(
         if (completedAt != null && (completedAt.isBefore(createdAt) || completedAt.isAfter(updatedAt))) {
             throw new IllegalArgumentException("completedAt must be between createdAt and updatedAt");
         }
+        if (reviewStatus == AnalysisReviewStatus.PENDING && reviewedAt != null) {
+            throw new IllegalArgumentException("pending Analysis must not have a reviewedAt timestamp");
+        }
+        if (reviewedAt != null && (reviewedAt.isBefore(createdAt) || reviewedAt.isAfter(updatedAt))) {
+            throw new IllegalArgumentException("reviewedAt must be between createdAt and updatedAt");
+        }
         validateOwnerExpiry(owner, expiresAt, createdAt);
     }
 
@@ -67,6 +74,7 @@ public record Analysis(
                 owner,
                 AnalysisStatus.CREATED,
                 AnalysisReviewStatus.PENDING,
+                null,
                 null,
                 null,
                 null,
@@ -102,6 +110,7 @@ public record Analysis(
                 owner,
                 AnalysisStatus.UPLOADING,
                 reviewStatus,
+                reviewedAt,
                 reconciliationStatus,
                 supplierName,
                 supplierKey,
@@ -136,7 +145,7 @@ public record Analysis(
         }
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, AnalysisStatus.CLASSIFYING, reviewStatus, reconciliationStatus,
+                id, owner, AnalysisStatus.CLASSIFYING, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, false, null,
                 null, version, null, expiresAt, createdAt, now);
@@ -150,7 +159,7 @@ public record Analysis(
         }
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, AnalysisStatus.EXTRACTING, reviewStatus, reconciliationStatus,
+                id, owner, AnalysisStatus.EXTRACTING, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, false, null,
                 null, version, null, expiresAt, createdAt, now);
@@ -164,7 +173,7 @@ public record Analysis(
         }
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, AnalysisStatus.AWAITING_CONFIRMATION, reviewStatus, reconciliationStatus,
+                id, owner, AnalysisStatus.AWAITING_CONFIRMATION, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, false, null, null,
                 version, null, expiresAt, createdAt, now);
@@ -187,7 +196,7 @@ public record Analysis(
         requireSafeMessage(safeUserMessage, "safeUserMessage");
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, AnalysisStatus.FAILED, reviewStatus, reconciliationStatus,
+                id, owner, AnalysisStatus.FAILED, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, effectiveRetryable,
                 safeCode, safeUserMessage, version, null, expiresAt, createdAt, now);
@@ -203,7 +212,7 @@ public record Analysis(
         requireSafeMessage(safeUserMessage, "safeUserMessage");
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, AnalysisStatus.FAILED, reviewStatus, reconciliationStatus,
+                id, owner, AnalysisStatus.FAILED, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, false,
                 safeCode, safeUserMessage, version, null, expiresAt, createdAt, now);
@@ -219,7 +228,7 @@ public record Analysis(
         requireMachineStage(failedStage);
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, failedStage, reviewStatus, reconciliationStatus,
+                id, owner, failedStage, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance, false,
                 null, null, version, null, expiresAt, createdAt, now);
@@ -253,6 +262,7 @@ public record Analysis(
                 owner,
                 AnalysisStatus.MATCHING,
                 reviewStatus,
+                reviewedAt,
                 null,
                 confirmedSupplierName,
                 supplierKey(confirmedSupplierName),
@@ -304,7 +314,7 @@ public record Analysis(
         }
         requireTransitionTime(now);
         return new Analysis(
-                id, owner, AnalysisStatus.GENERATING_REPORT, reviewStatus, result,
+                id, owner, AnalysisStatus.GENERATING_REPORT, reviewStatus, reviewedAt, result,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance,
                 retryable, failureCode, failureUserMessage, version, completedAt, expiresAt, createdAt, now);
@@ -318,10 +328,33 @@ public record Analysis(
         }
         requireTransitionTime(generatedAt);
         return new Analysis(
-                id, owner, AnalysisStatus.COMPLETED, reviewStatus, reconciliationStatus,
+                id, owner, AnalysisStatus.COMPLETED, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance,
                 false, failureCode, failureUserMessage, version, generatedAt, expiresAt, createdAt, generatedAt);
+    }
+
+    /** Changes the private review state of a completed registered Analysis. */
+    public Analysis changeReviewStatus(AnalysisReviewStatus nextReviewStatus, Instant now) {
+        Objects.requireNonNull(nextReviewStatus, "nextReviewStatus must not be null");
+        Objects.requireNonNull(now, "now must not be null");
+        if (!(owner instanceof RegisteredUserOwner)) {
+            throw new IllegalStateException("Only a registered Analysis can be reviewed");
+        }
+        if (status != AnalysisStatus.COMPLETED) {
+            throw new IllegalStateException("Only a completed Analysis can be reviewed");
+        }
+        if (reviewStatus == nextReviewStatus) {
+            return this;
+        }
+        requireTransitionTime(now);
+
+        Instant nextReviewedAt = nextReviewStatus == AnalysisReviewStatus.REVIEWED ? now : null;
+        return new Analysis(
+                id, owner, status, nextReviewStatus, nextReviewedAt, reconciliationStatus,
+                supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
+                referenceTotal, invoicedTotal, difference, priceTolerance, retryable,
+                failureCode, failureUserMessage, version, completedAt, expiresAt, createdAt, now);
     }
 
     private void requireTransitionTime(Instant now) {
@@ -355,7 +388,7 @@ public record Analysis(
 
     private Analysis withStatus(AnalysisStatus nextStatus, Instant now) {
         return new Analysis(
-                id, owner, nextStatus, reviewStatus, reconciliationStatus,
+                id, owner, nextStatus, reviewStatus, reviewedAt, reconciliationStatus,
                 supplierName, supplierKey, referenceType, referenceNumber, invoiceNumber, currency,
                 referenceTotal, invoicedTotal, difference, priceTolerance,
                 retryable, failureCode, failureUserMessage, version, completedAt, expiresAt, createdAt, now);
