@@ -88,7 +88,7 @@ class GetAnalysisStatusServiceTest {
 
     private static Analysis failedAnalysis(UUID id, RegisteredUserOwner owner) {
         return new Analysis(
-                id, owner, AnalysisStatus.FAILED, AnalysisReviewStatus.PENDING, null,
+                id, owner, AnalysisStatus.FAILED, AnalysisReviewStatus.PENDING, null, null,
                 null, null, null, null, null, null, null, null, null,
                 PriceTolerance.exactMatch(), false, "PROCESSING_FAILED",
                 "Analysis processing failed.", 0, NOW, null, NOW, NOW);

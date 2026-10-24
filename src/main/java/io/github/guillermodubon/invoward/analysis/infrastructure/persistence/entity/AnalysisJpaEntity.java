@@ -38,6 +38,9 @@ public class AnalysisJpaEntity {
     @Column(name = "review_status", nullable = false, length = 20)
     private AnalysisReviewStatus reviewStatus;
 
+    @Column(name = "reviewed_at")
+    private Instant reviewedAt;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "reconciliation_status", length = 24)
     private AnalysisReconciliationStatus reconciliationStatus;
@@ -115,6 +118,8 @@ public class AnalysisJpaEntity {
     public void setStatus(AnalysisStatus status) { this.status = status; }
     public AnalysisReviewStatus getReviewStatus() { return reviewStatus; }
     public void setReviewStatus(AnalysisReviewStatus reviewStatus) { this.reviewStatus = reviewStatus; }
+    public Instant getReviewedAt() { return reviewedAt; }
+    public void setReviewedAt(Instant reviewedAt) { this.reviewedAt = reviewedAt; }
     public AnalysisReconciliationStatus getReconciliationStatus() { return reconciliationStatus; }
     public void setReconciliationStatus(AnalysisReconciliationStatus reconciliationStatus) { this.reconciliationStatus = reconciliationStatus; }
     public String getSupplierName() { return supplierName; }

@@ -190,7 +190,7 @@ class LineMatchingPersistenceWorkflowIT {
         org.mockito.Mockito.verify(processingWakePort).wake(fixture.analysisId());
         assertEquals(0, countRows("invoward.reconciliation_lines", fixture.analysisId()));
         assertEquals(0, countRows("invoward.discrepancies", fixture.analysisId()));
-        assertNoVersionEightMigration();
+        assertReviewedAtMigrationAppliedOnce();
     }
 
     @Test
@@ -223,7 +223,7 @@ class LineMatchingPersistenceWorkflowIT {
             assertEquals(3, lineItemMatchRepository.countByAnalysisId(fixture.analysisId()));
             assertCompleteCover(fixture, firstResult);
             assertWorkflow(fixture, AnalysisStatus.AWAITING_MATCH_REVIEW);
-            assertNoVersionEightMigration();
+            assertReviewedAtMigrationAppliedOnce();
         } finally {
             releaseMatcher.countDown();
             executor.shutdownNow();
@@ -298,15 +298,15 @@ class LineMatchingPersistenceWorkflowIT {
         return confirmed.lineItemIds();
     }
 
-    private void assertNoVersionEightMigration() {
-        assertEquals("007", jdbcTemplate.queryForObject("""
+    private void assertReviewedAtMigrationAppliedOnce() {
+        assertEquals("008", jdbcTemplate.queryForObject("""
                 SELECT version
                 FROM invoward.flyway_schema_history
                 WHERE success = TRUE AND version IS NOT NULL
                 ORDER BY installed_rank DESC
                 LIMIT 1
                 """, String.class));
-        assertEquals(0, jdbcTemplate.queryForObject("""
+        assertEquals(1, jdbcTemplate.queryForObject("""
                 SELECT COUNT(*)
                 FROM invoward.flyway_schema_history
                 WHERE version = '008'

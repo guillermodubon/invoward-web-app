@@ -1,8 +1,13 @@
 package io.github.guillermodubon.invoward.extraction.api;
 
+import io.github.guillermodubon.invoward.analysis.application.port.AnalysisProcessingSignalPublisher;
 import io.github.guillermodubon.invoward.document.domain.DocumentType;
 import io.github.guillermodubon.invoward.extraction.application.model.ExtractionDraft;
+import io.github.guillermodubon.invoward.identity.domain.UserStatus;
 import io.github.guillermodubon.invoward.processing.infrastructure.ProcessingWorker;
+import io.github.guillermodubon.invoward.reconciliation.application.service.ReconcileAnalysisService;
+import io.github.guillermodubon.invoward.reconciliation.application.service.RunLineItemMatchingService;
+import io.github.guillermodubon.invoward.reporting.application.service.GenerateReportService;
 import io.github.guillermodubon.invoward.support.ai.FakeAmbiguousLineMatcher;
 import io.github.guillermodubon.invoward.support.ai.FakeDocumentIntelligence;
 import io.github.guillermodubon.invoward.support.database.PostgresTestContainer;
@@ -20,8 +25,10 @@ import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -45,8 +52,11 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /** Exercises both complete persisted processing workflows over real HTTP and PostgreSQL. */
 @SpringBootTest(
@@ -74,11 +84,20 @@ class ProcessingFullWorkflowIntegrationIT {
     @Autowired private Environment environment;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private JdbcTemplate jdbcTemplate;
+    @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private ProcessingWorker processingWorker;
     @Autowired private FakeDocumentStorage documentStorage;
     @Autowired private FakeDocumentIntelligence intelligence;
     @Autowired private FakeReportStorage reportStorage;
     @Autowired private FakeAmbiguousLineMatcher ambiguousMatcher;
+    @MockitoSpyBean private ProcessingWorker processingWorkerSpy;
+    @MockitoSpyBean private AnalysisProcessingSignalPublisher processingSignalPublisher;
+    @MockitoSpyBean private RunLineItemMatchingService runLineItemMatchingService;
+    @MockitoSpyBean private ReconcileAnalysisService reconcileAnalysisService;
+    @MockitoSpyBean private GenerateReportService generateReportService;
+
+    private UUID revisitUserId;
+    private UUID revisitAnalysisId;
 
     @DynamicPropertySource
     static void configurePostgres(DynamicPropertyRegistry registry) {
@@ -91,6 +110,14 @@ class ProcessingFullWorkflowIntegrationIT {
         intelligence.reset();
         reportStorage.clear();
         ambiguousMatcher.reset();
+        if (revisitAnalysisId != null) {
+            jdbcTemplate.update("DELETE FROM invoward.analyses WHERE id = ?", revisitAnalysisId);
+            revisitAnalysisId = null;
+        }
+        if (revisitUserId != null) {
+            jdbcTemplate.update("DELETE FROM invoward.users WHERE id = ?", revisitUserId);
+            revisitUserId = null;
+        }
     }
 
     @Test
@@ -231,6 +258,207 @@ class ProcessingFullWorkflowIntegrationIT {
         assertEquals("MATCHED", reconciliation.get("reconciliationStatus").asString());
         assertEquals(1, reconciliation.get("summary").get("matchedCount").asInt());
         assertEquals(0, count("invoward.discrepancies", workflow.analysisId()));
+    }
+
+    @Test
+    void revisitingCompletedRegisteredAnalysisReadsPersistedResultsWithoutReprocessing() throws Exception {
+        Workflow workflow = startRegisteredWorkflow("history-revisit");
+        configureDocumentTypes(workflow);
+        intelligence.setExtraction(extractionDraft());
+
+        processingWorker.process(workflow.analysisId());
+        assertStatus(workflow, "CLASSIFYING", "WAITING_FOR_USER", "CLASSIFYING");
+        HttpResponse<String> extractionQueued = postJson(
+                workflow, analysisPath(workflow.analysisId()) + "/extract",
+                "{\"referenceType\":\"QUOTE\",\"invoiceType\":\"INVOICE\"}");
+        assertAcceptedStatus(extractionQueued, workflow, "EXTRACTING", "QUEUED", "EXTRACTING");
+        processingWorker.process(workflow.analysisId());
+        assertStatus(workflow, "AWAITING_CONFIRMATION", "WAITING_FOR_USER", "AWAITING_CONFIRMATION");
+
+        JsonNode extraction = readJson(get(workflow, analysisPath(workflow.analysisId()) + "/extraction"));
+        HttpResponse<String> extractionConfirmed = postJson(
+                workflow,
+                analysisPath(workflow.analysisId()) + "/extraction/confirm",
+                confirmation(extraction));
+        assertAcceptedStatus(extractionConfirmed, workflow, "MATCHING", "QUEUED", "MATCHING");
+        processingWorker.process(workflow.analysisId());
+        assertStatus(workflow, "RECONCILING", "QUEUED", "RECONCILING");
+        processingWorker.process(workflow.analysisId());
+        assertStatus(workflow, "GENERATING_REPORT", "QUEUED", "GENERATING_REPORT");
+        processingWorker.process(workflow.analysisId());
+        assertStatus(workflow, "COMPLETED", "COMPLETED", "COMPLETED");
+        assertPersistedCompletion(
+                workflow, "MATCHED", "SKU", "ITEM-PIPELINE-001", "ITEM-PIPELINE-001",
+                "Fastener pack", "Fastener pack");
+
+        HttpResponse<String> noteSaved = putJson(
+                workflow,
+                analysisPath(workflow.analysisId()) + "/note",
+                "{\"text\":\"private historical note\",\"expectedVersion\":null}");
+        assertEquals(200, noteSaved.statusCode(), noteSaved.body());
+
+        Map<String, List<Map<String, Object>>> persistedBeforeReads = persistedSnapshot(workflow.analysisId());
+        int classifyCalls = intelligence.totalClassifyCalls();
+        int extractionCalls = intelligence.extractCalls();
+        int matcherCalls = ambiguousMatcher.callCount();
+        int documentStores = documentStorage.operationCalls(FakeDocumentStorage.Operation.STORE);
+        int documentDeletes = documentStorage.operationCalls(FakeDocumentStorage.Operation.DELETE);
+        int documentDownloads = documentStorage.operationCalls(FakeDocumentStorage.Operation.DOWNLOAD);
+        int reportStores = reportStorage.operationCalls(FakeReportStorage.Operation.STORE);
+        int reportDeletes = reportStorage.operationCalls(FakeReportStorage.Operation.DELETE);
+        int reportObjects = reportStorage.storedObjectCount();
+        clearInvocations(
+                processingWorkerSpy,
+                processingSignalPublisher,
+                runLineItemMatchingService,
+                reconcileAnalysisService,
+                generateReportService);
+
+        String basePath = analysisPath(workflow.analysisId());
+        HttpResponse<String> history = get(workflow, "/api/analyses");
+        assertEquals(200, history.statusCode(), history.body());
+        assertTrue(history.body().contains(workflow.analysisId().toString()));
+        assertFalse(history.body().contains("private historical note"));
+
+        HttpResponse<String> detail = get(workflow, basePath);
+        assertEquals(200, detail.statusCode(), detail.body());
+        assertFalse(detail.body().contains("private historical note"));
+        assertEquals(200, get(workflow, basePath + "/status").statusCode());
+
+        HttpResponse<String> note = get(workflow, basePath + "/note");
+        assertEquals(200, note.statusCode(), note.body());
+        assertTrue(note.body().contains("private historical note"));
+
+        HttpResponse<String> documents = get(workflow, basePath + "/documents");
+        assertEquals(200, documents.statusCode(), documents.body());
+        assertEquals(200, get(workflow, basePath + "/documents/" + workflow.referenceDocumentId()).statusCode());
+        assertEquals(200, get(workflow, basePath + "/documents/" + workflow.invoiceDocumentId()).statusCode());
+        assertEquals(200, get(workflow, basePath + "/extraction").statusCode());
+        assertEquals(200, get(workflow, basePath + "/matches").statusCode());
+        assertEquals(200, get(workflow, basePath + "/reconciliation").statusCode());
+
+        HttpResponse<String> report = get(workflow, basePath + "/report");
+        assertEquals(200, report.statusCode(), report.body());
+        assertEquals("application/pdf", readJson(report).get("contentType").asString());
+        HttpResponse<String> csv = get(workflow, basePath + "/export.csv");
+        assertEquals(200, csv.statusCode(), csv.body());
+        assertTrue(csv.body().contains("Fastener pack"));
+
+        assertEquals(classifyCalls, intelligence.totalClassifyCalls());
+        assertEquals(extractionCalls, intelligence.extractCalls());
+        assertEquals(matcherCalls, ambiguousMatcher.callCount());
+        assertEquals(documentStores, documentStorage.operationCalls(FakeDocumentStorage.Operation.STORE));
+        assertEquals(documentDeletes, documentStorage.operationCalls(FakeDocumentStorage.Operation.DELETE));
+        assertEquals(documentDownloads, documentStorage.operationCalls(FakeDocumentStorage.Operation.DOWNLOAD));
+        assertEquals(reportStores, reportStorage.operationCalls(FakeReportStorage.Operation.STORE));
+        assertEquals(reportDeletes, reportStorage.operationCalls(FakeReportStorage.Operation.DELETE));
+        assertEquals(reportObjects, reportStorage.storedObjectCount());
+        assertEquals(persistedBeforeReads, persistedSnapshot(workflow.analysisId()));
+        verifyNoInteractions(
+                processingWorkerSpy,
+                processingSignalPublisher,
+                runLineItemMatchingService,
+                reconcileAnalysisService,
+                generateReportService);
+    }
+
+    private Workflow startRegisteredWorkflow(String scenario) throws Exception {
+        URI baseUri = applicationUri();
+        String email = "history-revisit-" + UUID.randomUUID() + "@example.test";
+        revisitUserId = UUID.randomUUID();
+        jdbcTemplate.update("""
+                INSERT INTO invoward.users
+                    (id, display_name, email, password_hash, email_verified, status)
+                VALUES (?, 'History Revisit User', ?, ?, true, ?)
+                """, revisitUserId, email, passwordEncoder.encode("history revisit password"), UserStatus.ACTIVE.name());
+
+        HttpResponse<String> preAuthenticationCsrf = httpClient.send(
+                HttpRequest.newBuilder(baseUri.resolve("/api/auth/csrf"))
+                        .timeout(REQUEST_TIMEOUT).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, preAuthenticationCsrf.statusCode(), preAuthenticationCsrf.body());
+        JsonNode preCsrf = readJson(preAuthenticationCsrf);
+        String preAuthenticationSession = cookieValue(preAuthenticationCsrf, SESSION_COOKIE);
+        HttpResponse<String> login = sendJson(
+                baseUri,
+                "/api/auth/login",
+                preAuthenticationSession,
+                null,
+                preCsrf.get("token").asString(),
+                objectMapper.writeValueAsString(Map.of("email", email, "password", "history revisit password")),
+                "POST");
+        assertEquals(200, login.statusCode(), login.body());
+        String sessionCookie = cookieValue(login, SESSION_COOKIE);
+
+        HttpResponse<String> authenticatedCsrfResponse = httpClient.send(
+                HttpRequest.newBuilder(baseUri.resolve("/api/auth/csrf"))
+                        .timeout(REQUEST_TIMEOUT)
+                        .header("Cookie", SESSION_COOKIE + "=" + sessionCookie)
+                        .GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, authenticatedCsrfResponse.statusCode(), authenticatedCsrfResponse.body());
+        JsonNode authenticatedCsrf = readJson(authenticatedCsrfResponse);
+        sessionCookie = updatedCookieValue(authenticatedCsrfResponse, SESSION_COOKIE, sessionCookie);
+        String csrfToken = authenticatedCsrf.get("token").asString();
+
+        HttpResponse<String> created = sendJson(
+                baseUri, "/api/analyses", sessionCookie, null, csrfToken, "{}", "POST");
+        assertEquals(202, created.statusCode(), created.body());
+        assertTrue(created.headers().allValues("Set-Cookie").stream()
+                .noneMatch(value -> value.startsWith(GUEST_COOKIE + "=")));
+        UUID analysisId = UUID.fromString(readJson(created).get("id").asString());
+        revisitAnalysisId = analysisId;
+        Workflow workflow = new Workflow(baseUri, analysisId, sessionCookie, null, csrfToken);
+        UUID referenceDocument = uploadDocument(workflow, "REFERENCE", validPdf(scenario + "-reference"));
+        UUID invoiceDocument = uploadDocument(workflow, "INVOICE", validPdf(scenario + "-invoice"));
+        return workflow.withDocuments(referenceDocument, invoiceDocument);
+    }
+
+    private String updatedCookieValue(HttpResponse<?> response, String cookieName, String fallback) {
+        String prefix = cookieName + "=";
+        return response.headers().allValues("Set-Cookie").stream()
+                .filter(value -> value.startsWith(prefix))
+                .map(value -> value.substring(prefix.length()).split(";", 2)[0])
+                .filter(value -> !value.isBlank())
+                .findFirst()
+                .orElse(fallback);
+    }
+
+    private Map<String, List<Map<String, Object>>> persistedSnapshot(UUID analysisId) {
+        Map<String, List<Map<String, Object>>> snapshot = new LinkedHashMap<>();
+        snapshot.put("analysis", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.analyses WHERE id = ?", analysisId));
+        snapshot.put("job", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.analysis_jobs WHERE analysis_id = ?", analysisId));
+        snapshot.put("documents", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.documents WHERE analysis_id = ? ORDER BY id", analysisId));
+        snapshot.put("extractedDocuments", jdbcTemplate.queryForList("""
+                SELECT ed.* FROM invoward.extracted_documents ed
+                JOIN invoward.documents d ON d.id = ed.document_id
+                WHERE d.analysis_id = ? ORDER BY ed.id
+                """, analysisId));
+        snapshot.put("extractedLines", jdbcTemplate.queryForList("""
+                SELECT li.* FROM invoward.extracted_line_items li
+                JOIN invoward.extracted_documents ed ON ed.id = li.extracted_document_id
+                JOIN invoward.documents d ON d.id = ed.document_id
+                WHERE d.analysis_id = ? ORDER BY li.id
+                """, analysisId));
+        snapshot.put("matches", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.line_item_matches WHERE analysis_id = ? ORDER BY id", analysisId));
+        snapshot.put("reconciliationLines", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.reconciliation_lines WHERE analysis_id = ? ORDER BY id", analysisId));
+        snapshot.put("discrepancies", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.discrepancies WHERE analysis_id = ? ORDER BY id", analysisId));
+        snapshot.put("evidence", jdbcTemplate.queryForList("""
+                SELECT e.* FROM invoward.discrepancy_evidence e
+                JOIN invoward.discrepancies d ON d.id = e.discrepancy_id
+                WHERE d.analysis_id = ? ORDER BY e.id
+                """, analysisId));
+        snapshot.put("report", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.generated_reports WHERE analysis_id = ?", analysisId));
+        snapshot.put("note", jdbcTemplate.queryForList(
+                "SELECT * FROM invoward.analysis_notes WHERE analysis_id = ?", analysisId));
+        return snapshot;
     }
 
     private Workflow startWorkflow(String scenario) throws Exception {
@@ -413,9 +641,9 @@ class ProcessingFullWorkflowIntegrationIT {
         assertTrue(((Number) persistedReport.get("size_bytes")).longValue() > 0);
         assertTrue(persistedReport.get("sha256").toString().matches("[0-9a-f]{64}"));
         assertTrue(Boolean.TRUE.equals(jdbcTemplate.queryForObject(
-                "SELECT gr.expires_at = a.expires_at FROM invoward.generated_reports gr "
+                "SELECT gr.expires_at IS NOT DISTINCT FROM a.expires_at FROM invoward.generated_reports gr "
                         + "JOIN invoward.analyses a ON a.id = gr.analysis_id WHERE gr.analysis_id = ?",
-                Boolean.class, analysisId)), "guest report expiry must match its Analysis expiry");
+                Boolean.class, analysisId)), "report expiry must match its Analysis expiry");
     }
 
     private void assertPersistedExtraction(

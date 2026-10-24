@@ -101,6 +101,7 @@ class ReportDownloadPolicyTest {
                 owner,
                 AnalysisStatus.GENERATING_REPORT,
                 AnalysisReviewStatus.REVIEWED,
+                null,
                 AnalysisReconciliationStatus.MATCHED,
                 null, null, null, null, null, null, null, null, null,
                 new PriceTolerance(BigDecimal.ZERO, null), false, null, null,

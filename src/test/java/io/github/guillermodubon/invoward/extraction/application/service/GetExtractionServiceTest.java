@@ -166,7 +166,7 @@ class GetExtractionServiceTest {
     private static Analysis analysis(AnalysisStatus status) {
         Analysis base = Analysis.create(ANALYSIS_ID, OWNER, PriceTolerance.exactMatch(), NOW.minusSeconds(10));
         return new Analysis(
-                base.id(), base.owner(), status, base.reviewStatus(), base.reconciliationStatus(),
+                base.id(), base.owner(), status, base.reviewStatus(), base.reviewedAt(), base.reconciliationStatus(),
                 base.supplierName(), base.supplierKey(), base.referenceType(), base.referenceNumber(),
                 base.invoiceNumber(), base.currency(), base.referenceTotal(), base.invoicedTotal(),
                 base.difference(), base.priceTolerance(), base.retryable(), base.failureCode(),
