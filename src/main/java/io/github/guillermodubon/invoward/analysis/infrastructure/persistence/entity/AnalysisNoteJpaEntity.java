@@ -36,6 +36,10 @@ public class AnalysisNoteJpaEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    public static AnalysisNoteJpaEntity create() {
+        return new AnalysisNoteJpaEntity();
+    }
+
     public UUID getId() { return id; }
     public UUID getAnalysisId() { return analysisId; }
     public void setAnalysisId(UUID analysisId) { this.analysisId = analysisId; }
