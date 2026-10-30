@@ -2,12 +2,11 @@ package io.github.guillermodubon.invoward.sharing.infrastructure.persistence.ent
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -15,7 +14,6 @@ import java.util.UUID;
 public class ShareLinkJpaEntity {
 
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", nullable = false, updatable = false)
     private UUID id;
 
@@ -33,6 +31,12 @@ public class ShareLinkJpaEntity {
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
+
+    public static ShareLinkJpaEntity create(UUID id) {
+        ShareLinkJpaEntity entity = new ShareLinkJpaEntity();
+        entity.id = Objects.requireNonNull(id, "id must not be null");
+        return entity;
+    }
 
     public UUID getId() { return id; }
     public UUID getAnalysisId() { return analysisId; }

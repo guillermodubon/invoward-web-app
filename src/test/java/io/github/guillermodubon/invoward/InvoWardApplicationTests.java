@@ -16,6 +16,7 @@ import io.github.guillermodubon.invoward.reconciliation.infrastructure.persisten
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyJpaRepository;
 import io.github.guillermodubon.invoward.reconciliation.infrastructure.persistence.repository.SpringDataDiscrepancyEvidenceJpaRepository;
 import io.github.guillermodubon.invoward.reporting.infrastructure.persistence.repository.SpringDataGeneratedReportJpaRepository;
+import io.github.guillermodubon.invoward.sharing.infrastructure.persistence.repository.SpringDataShareLinkJpaRepository;
 import io.github.guillermodubon.invoward.reporting.application.port.ReportGenerator;
 import io.github.guillermodubon.invoward.reporting.infrastructure.pdf.OpenHtmlToPdfReportGenerator;
 import io.github.guillermodubon.invoward.extraction.application.port.DocumentIntelligence;
@@ -97,6 +98,9 @@ class InvoWardApplicationTests {
 
     @MockitoBean
     private SpringDataGeneratedReportJpaRepository generatedReportJpaRepository;
+
+    @MockitoBean
+    private SpringDataShareLinkJpaRepository shareLinkJpaRepository;
 
     @Autowired
     private ApplicationContext applicationContext;
