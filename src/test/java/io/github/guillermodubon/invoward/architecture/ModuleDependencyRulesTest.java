@@ -47,6 +47,33 @@ class ModuleDependencyRulesTest {
             .should().dependOnClassesThat()
             .resideInAPackage("..reconciliation..");
 
+    private static final ArchRule SHARING_MUST_NOT_DEPEND_ON_UNAPPROVED_MODULES = noClasses()
+            .that().resideInAPackage("..sharing..")
+            .should().dependOnClassesThat()
+            .resideInAnyPackage(
+                    "..identity..",
+                    "..document..",
+                    "..extraction..",
+                    "..processing..",
+                    "..notification..",
+                    "..shared.."
+            );
+
+    private static final ArchRule OTHER_MODULES_MUST_NOT_DEPEND_ON_SHARING = noClasses()
+            .that().resideInAnyPackage(
+                    "..identity..",
+                    "..document..",
+                    "..analysis..",
+                    "..extraction..",
+                    "..reconciliation..",
+                    "..reporting..",
+                    "..processing..",
+                    "..notification..",
+                    "..shared.."
+            )
+            .should().dependOnClassesThat()
+            .resideInAPackage("..sharing..");
+
     private static final ArchRule MODULES_MUST_BE_FREE_OF_CYCLES = slices()
             .matching(BASE_PACKAGE + ".(*)..")
             .should().beFreeOfCycles();
@@ -69,5 +96,15 @@ class ModuleDependencyRulesTest {
     @Test
     void analysisMustNotDependOnReconciliation() {
         ANALYSIS_MUST_NOT_DEPEND_ON_RECONCILIATION.check(PRODUCTION_CLASSES);
+    }
+
+    @Test
+    void sharingMayOnlyDependOnApprovedBusinessModules() {
+        SHARING_MUST_NOT_DEPEND_ON_UNAPPROVED_MODULES.check(PRODUCTION_CLASSES);
+    }
+
+    @Test
+    void otherModulesMustNotDependOnSharing() {
+        OTHER_MODULES_MUST_NOT_DEPEND_ON_SHARING.check(PRODUCTION_CLASSES);
     }
 }

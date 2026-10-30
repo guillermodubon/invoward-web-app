@@ -40,7 +40,12 @@ import io.github.guillermodubon.invoward.reconciliation.infrastructure.persisten
 import io.github.guillermodubon.invoward.reporting.application.service.GenerateReportService;
 import io.github.guillermodubon.invoward.reporting.application.service.GetGeneratedReportService;
 import io.github.guillermodubon.invoward.reporting.application.service.ExportReconciliationCsvService;
+import io.github.guillermodubon.invoward.sharing.application.service.RevokeShareLinkService;
+import io.github.guillermodubon.invoward.sharing.application.exception.PublicSharedReportNotFoundException;
+import io.github.guillermodubon.invoward.sharing.application.model.PublicSharedReport;
+import io.github.guillermodubon.invoward.sharing.application.service.GetPublicSharedReportService;
 import io.github.guillermodubon.invoward.reporting.infrastructure.persistence.repository.SpringDataGeneratedReportJpaRepository;
+import io.github.guillermodubon.invoward.sharing.infrastructure.persistence.repository.SpringDataShareLinkJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
@@ -84,6 +89,7 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.time.Instant;
 import java.time.Duration;
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -106,6 +112,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
@@ -166,6 +173,9 @@ class SecurityConfigurationTest {
     private SpringDataGeneratedReportJpaRepository generatedReportJpaRepository;
 
     @MockitoBean
+    private SpringDataShareLinkJpaRepository shareLinkJpaRepository;
+
+    @MockitoBean
     private GenerateReportService generateReportService;
 
     @MockitoBean
@@ -197,6 +207,12 @@ class SecurityConfigurationTest {
 
     @MockitoBean
     private UpdateDiscrepancyService updateDiscrepancyService;
+
+    @MockitoBean
+    private RevokeShareLinkService revokeShareLinkService;
+
+    @MockitoBean
+    private GetPublicSharedReportService getPublicSharedReportService;
 
     @MockitoBean
     private GuestSessionCookieSupport guestSessionCookieSupport;
@@ -338,6 +354,139 @@ class SecurityConfigurationTest {
         mockMvc.perform(get("/api/analyses/{id}/status/extra", analysisId))
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(post("/api/analyses/{id}/status", analysisId)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void publicReportGetIsAnonymousNoStoreAndDoesNotCreateSessionOrCookie() throws Exception {
+        String token = "A".repeat(43);
+        when(getPublicSharedReportService.get(token)).thenReturn(publicSharedReport());
+
+        MvcResult result = mockMvc.perform(get("/api/public/reports/{token}", token))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(header().string("Referrer-Policy", "no-referrer"))
+                .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                .andExpect(header().doesNotExist("Set-Cookie"))
+                .andExpect(jsonPath("$.supplierName").value("Shared supplier"))
+                .andExpect(jsonPath("$.invoiceNumber").value("INV-PUBLIC"))
+                .andReturn();
+
+        assertNull(result.getRequest().getSession(false));
+        String body = result.getResponse().getContentAsString();
+        assertFalse(body.contains("userId"));
+        assertFalse(body.contains("guestSessionId"));
+        assertFalse(body.contains("storageKey"));
+        org.mockito.Mockito.verify(getPublicSharedReportService).get(token);
+    }
+
+    @Test
+    void publicShareUnavailableResponseIsSafeAndHasTheRequiredHeaders() throws Exception {
+        String expectedBody = "{\"code\":\"SHARE_LINK_NOT_FOUND\",\"message\":\"Shared report was not found.\"}";
+        for (String token : List.of("invalid-token", "A".repeat(43), "B".repeat(43))) {
+            when(getPublicSharedReportService.get(token)).thenThrow(new PublicSharedReportNotFoundException());
+
+            MvcResult result = mockMvc.perform(get("/api/public/reports/{token}", token))
+                    .andExpect(status().isNotFound())
+                    .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                    .andExpect(header().string("Cache-Control", "no-store"))
+                    .andExpect(header().string("Referrer-Policy", "no-referrer"))
+                    .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                    .andExpect(header().doesNotExist("Set-Cookie"))
+                    .andReturn();
+
+            assertEquals(expectedBody, result.getResponse().getContentAsString());
+            assertNull(result.getRequest().getSession(false));
+        }
+    }
+
+    @Test
+    void publicStorageFailureReturnsSanitizedServerErrorWithoutCreatingSession() throws Exception {
+        String token = "C".repeat(43);
+        when(getPublicSharedReportService.get(token))
+                .thenThrow(new IllegalStateException("tokenHash=private-hash SQL=private-query"));
+
+        MvcResult result = mockMvc.perform(get("/api/public/reports/{token}", token))
+                .andExpect(status().isInternalServerError())
+                .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(header().string("Referrer-Policy", "no-referrer"))
+                .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+                .andExpect(header().doesNotExist("Set-Cookie"))
+                .andExpect(content().json("""
+                        {"code":"SHARE_LINK_OPERATION_FAILED",
+                         "message":"The share-link operation could not be completed."}
+                        """))
+                .andReturn();
+
+        assertNull(result.getRequest().getSession(false));
+        String body = result.getResponse().getContentAsString();
+        assertFalse(body.contains("private-hash"));
+        assertFalse(body.contains("private-query"));
+    }
+
+    @Test
+    void publicReportPermitAllIsLimitedToGetAndOneTokenPathSegment() throws Exception {
+        String token = "A".repeat(43);
+        mockMvc.perform(get("/api/public/reports/{token}/nested", token))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().json("""
+                        {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
+                        """));
+
+        mockMvc.perform(request(org.springframework.http.HttpMethod.POST, "/api/public/reports/{token}", token)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().json("""
+                        {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
+                        """));
+
+        org.mockito.Mockito.verifyNoInteractions(getPublicSharedReportService);
+    }
+
+    @Test
+    void shareManagementMatchersStayNarrowAndMutationsStillRequireCsrf() throws Exception {
+        UUID analysisId = UUID.randomUUID();
+        UUID shareId = UUID.randomUUID();
+        when(analysisRequestOwnerResolver.resolveForRead(isNull(), any(HttpServletRequest.class)))
+                .thenReturn(Optional.empty());
+
+        mockMvc.perform(get("/api/analyses/{id}/share-links", analysisId))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+
+        assertCsrfFailure(post("/api/analyses/{id}/share-links", analysisId)
+                .contentType(APPLICATION_JSON)
+                .content("{\"expiresIn\":\"7_DAYS\"}"));
+        mockMvc.perform(post("/api/analyses/{id}/share-links", analysisId)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader())
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"expiresIn\":\"7_DAYS\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+
+        assertCsrfFailure(request(org.springframework.http.HttpMethod.DELETE,
+                "/api/analyses/{id}/share-links/{shareId}", analysisId, shareId));
+        mockMvc.perform(request(org.springframework.http.HttpMethod.DELETE,
+                        "/api/analyses/{id}/share-links/{shareId}", analysisId, shareId)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ANALYSIS_NOT_FOUND"));
+
+        mockMvc.perform(get("/api/analyses/{id}/share-links/{shareId}", analysisId, shareId))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/analyses/{id}/share-links/{shareId}", analysisId, shareId)
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
+                                .csrf().asHeader()))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(request(org.springframework.http.HttpMethod.DELETE,
+                        "/api/analyses/{id}/share-links/{shareId}/nested", analysisId, shareId)
                         .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors
                                 .csrf().asHeader()))
                 .andExpect(status().isUnauthorized());
@@ -852,6 +1001,17 @@ class SecurityConfigurationTest {
     }
 
     @Test
+    void shareLinkRevocationRemainsCsrfProtected() throws Exception {
+        mockMvc.perform(request(org.springframework.http.HttpMethod.DELETE,
+                        "/api/analyses/11111111-1111-1111-1111-111111111111/share-links/22222222-2222-2222-2222-222222222222")
+                        .session(authenticatedSession()))
+                .andExpect(status().isForbidden())
+                .andExpect(content().json("""
+                        {"code":"CSRF_INVALID","message":"The request could not be validated."}
+                        """));
+    }
+
+    @Test
     void validCsrfAllowsPublicRegistrationAndLoginRoutesToReachTheirHandlers() throws Exception {
         mockMvc.perform(post("/api/auth/register")
                         .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf()
@@ -1071,6 +1231,24 @@ class SecurityConfigurationTest {
                    "lines":[{"description":"Invoice item","quantity":1,"unitPrice":10,"lineTotal":10}]}
                 ]}
                 """.formatted(UUID.randomUUID(), UUID.randomUUID());
+    }
+
+    private static PublicSharedReport publicSharedReport() {
+        return new PublicSharedReport(
+                Instant.parse("2026-10-25T12:00:00Z"),
+                "Shared supplier",
+                "QUOTE",
+                "REF-PUBLIC",
+                "INV-PUBLIC",
+                "USD",
+                AnalysisReconciliationStatus.REVIEW_REQUIRED,
+                new BigDecimal("100.0000"),
+                new BigDecimal("105.0000"),
+                new BigDecimal("5.0000"),
+                new PublicSharedReport.Tolerance(BigDecimal.ZERO, null),
+                new PublicSharedReport.Summary(0, 0, 0, 0, 0, 0),
+                List.of(),
+                List.of());
     }
 
     private MockHttpSession authenticatedSession() {

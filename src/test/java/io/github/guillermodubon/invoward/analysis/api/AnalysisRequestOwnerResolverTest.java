@@ -19,6 +19,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -52,6 +53,44 @@ class AnalysisRequestOwnerResolverTest {
 
         assertEquals(new RegisteredUserOwner(userId), createdOwner);
         assertEquals(Optional.of(new RegisteredUserOwner(userId)), readOwner);
+        verify(guestSessionService, never()).findActive(guestId);
+        verify(guestSessionService, never()).create();
+    }
+
+    @Test
+    void authenticatedPrincipalWinsOverGuestCookie() {
+        UUID userId = UUID.randomUUID();
+        UUID guestId = UUID.randomUUID();
+        AuthenticatedIdentity identity = mock(AuthenticatedIdentity.class);
+        when(identity.userId()).thenReturn(userId);
+
+        Optional<AnalysisOwner> owner = resolver.resolveForReadPrincipal(
+                identity, requestWithGuestCookie(guestId));
+
+        assertEquals(Optional.of(new RegisteredUserOwner(userId)), owner);
+        verify(guestSessionService, never()).findActive(guestId);
+    }
+
+    @Test
+    void anonymousPrincipalMayResolveAnExistingGuestButNeverCreatesOne() {
+        GuestSession session = activeSession();
+        when(guestSessionService.findActive(session.id())).thenReturn(Optional.of(session));
+
+        Optional<AnalysisOwner> owner = resolver.resolveForReadPrincipal(
+                "anonymousUser", requestWithGuestCookie(session.id()));
+
+        assertEquals(Optional.of(new GuestSessionOwner(session.id(), session.expiresAt())), owner);
+        verify(guestSessionService, never()).create();
+    }
+
+    @Test
+    void unsupportedAuthenticatedPrincipalDoesNotFallBackToGuestCookie() {
+        UUID guestId = UUID.randomUUID();
+
+        Optional<AnalysisOwner> owner = resolver.resolveForReadPrincipal(
+                new Object(), requestWithGuestCookie(guestId));
+
+        assertFalse(owner.isPresent());
         verify(guestSessionService, never()).findActive(guestId);
         verify(guestSessionService, never()).create();
     }

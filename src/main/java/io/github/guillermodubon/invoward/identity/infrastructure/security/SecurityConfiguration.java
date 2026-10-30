@@ -115,6 +115,8 @@ public class SecurityConfiguration {
                 .authorizeHttpRequests(authorize -> authorize
                         .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/info", "/api/auth/csrf")
                         .permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/public/reports/*")
+                        .permitAll()
                         .requestMatchers(HttpMethod.POST,
                                 "/api/auth/register",
                                 "/api/auth/login",
@@ -128,6 +130,12 @@ public class SecurityConfiguration {
                         .requestMatchers(HttpMethod.GET, "/api/auth/me")
                         .authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/analyses")
+                        .permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/analyses/*/share-links")
+                        .permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/analyses/*/share-links")
+                        .permitAll()
+                        .requestMatchers(HttpMethod.DELETE, "/api/analyses/*/share-links/*")
                         .permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/analyses/*", "/api/analyses/*/status")
                         .permitAll()

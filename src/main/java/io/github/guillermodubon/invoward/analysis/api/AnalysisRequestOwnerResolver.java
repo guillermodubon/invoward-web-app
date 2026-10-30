@@ -14,6 +14,8 @@ import java.util.Optional;
 /** Resolves authenticated or guest ownership and records successful guest activity. */
 public class AnalysisRequestOwnerResolver {
 
+    private static final String ANONYMOUS_PRINCIPAL = "anonymousUser";
+
     private final GuestSessionCookieSupport cookieSupport;
     private final GuestSessionService guestSessionService;
 
@@ -46,6 +48,19 @@ public class AnalysisRequestOwnerResolver {
             return Optional.of(new RegisteredUserOwner(authenticatedIdentity.userId()));
         }
         return resolveActiveGuestSession(request).map(AnalysisRequestOwnerResolver::toOwner);
+    }
+
+    /** Resolves an HTTP security principal without making consumers depend on Identity types. */
+    public Optional<AnalysisOwner> resolveForReadPrincipal(
+            Object principal,
+            HttpServletRequest request) {
+        if (principal == null || ANONYMOUS_PRINCIPAL.equals(principal)) {
+            return resolveForRead(null, request);
+        }
+        if (principal instanceof AuthenticatedIdentity authenticatedIdentity) {
+            return resolveForRead(authenticatedIdentity, request);
+        }
+        return Optional.empty();
     }
 
     /** Touches a guest session only after its requested Analysis operation has succeeded. */
