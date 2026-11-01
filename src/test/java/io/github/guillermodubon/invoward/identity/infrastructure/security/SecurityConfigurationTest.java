@@ -48,6 +48,25 @@ import io.github.guillermodubon.invoward.reporting.infrastructure.persistence.re
 import io.github.guillermodubon.invoward.sharing.infrastructure.persistence.repository.SpringDataShareLinkJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataPasswordResetTokenJpaRepository;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataUserJpaRepository;
+import io.github.guillermodubon.invoward.insights.application.model.DashboardAggregateCounts;
+import io.github.guillermodubon.invoward.insights.application.model.DashboardDataQualityCounts;
+import io.github.guillermodubon.invoward.insights.application.model.DashboardRecentPage;
+import io.github.guillermodubon.invoward.insights.application.model.DashboardRecentQuery;
+import io.github.guillermodubon.invoward.insights.application.model.DashboardSummary;
+import io.github.guillermodubon.invoward.insights.application.model.InsightsPage;
+import io.github.guillermodubon.invoward.insights.application.model.InsightsPeriod;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierAggregateCounts;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierAnalysisPage;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierAnalysisQuery;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierKey;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierListPage;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierListQuery;
+import io.github.guillermodubon.invoward.insights.application.model.SupplierSummary;
+import io.github.guillermodubon.invoward.insights.application.service.GetDashboardSummaryService;
+import io.github.guillermodubon.invoward.insights.application.service.GetSupplierSummaryService;
+import io.github.guillermodubon.invoward.insights.application.service.ListDashboardRecentService;
+import io.github.guillermodubon.invoward.insights.application.service.ListSupplierAnalysesService;
+import io.github.guillermodubon.invoward.insights.application.service.ListSuppliersService;
 import io.github.guillermodubon.invoward.identity.infrastructure.persistence.repository.SpringDataGuestSessionJpaRepository;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
@@ -90,6 +109,7 @@ import tools.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.time.Duration;
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -215,6 +235,21 @@ class SecurityConfigurationTest {
     private GetPublicSharedReportService getPublicSharedReportService;
 
     @MockitoBean
+    private GetDashboardSummaryService getDashboardSummaryService;
+
+    @MockitoBean
+    private ListDashboardRecentService listDashboardRecentService;
+
+    @MockitoBean
+    private ListSuppliersService listSuppliersService;
+
+    @MockitoBean
+    private GetSupplierSummaryService getSupplierSummaryService;
+
+    @MockitoBean
+    private ListSupplierAnalysesService listSupplierAnalysesService;
+
+    @MockitoBean
     private GuestSessionCookieSupport guestSessionCookieSupport;
 
     @Autowired
@@ -255,6 +290,167 @@ class SecurityConfigurationTest {
         assertFalse(filters.stream().anyMatch(filter -> filter.getClass().getSimpleName().equals("RememberMeAuthenticationFilter")));
         assertFalse(filters.stream().anyMatch(filter -> filter.getClass().getSimpleName()
                 .equals("DefaultLoginPageGeneratingFilter")));
+    }
+
+    @Test
+    void dashboardEndpointsRequireRegisteredAuthenticationAndDoNotCreateGuestSession() throws Exception {
+        for (String path : List.of("/api/dashboard/summary", "/api/dashboard/recent")) {
+            for (boolean guestCookiePresent : List.of(false, true)) {
+                MockHttpServletRequestBuilder request = get(path);
+                if (guestCookiePresent) {
+                    request.cookie(new jakarta.servlet.http.Cookie(
+                            GuestSessionCookieSupport.COOKIE_NAME, UUID.randomUUID().toString()));
+                }
+                MvcResult result = mockMvc.perform(request)
+                        .andExpect(status().isUnauthorized())
+                        .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                        .andExpect(content().json("""
+                                {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
+                                """))
+                        .andExpect(header().doesNotExist("Set-Cookie"))
+                        .andReturn();
+                assertNull(result.getRequest().getSession(false));
+                assertTrue(result.getResponse().getHeader("Cache-Control").contains("no-store"));
+            }
+        }
+
+        org.mockito.Mockito.verifyNoInteractions(
+                getDashboardSummaryService,
+                listDashboardRecentService,
+                guestSessionCookieSupport,
+                analysisRequestOwnerResolver);
+    }
+
+    @Test
+    void registeredAccountCanReadDashboardAndRecentWithoutTriggeringProcessing() throws Exception {
+        UUID registeredUserId = UUID.fromString("a3d9151b-50d3-42c4-9c08-9637795af0c1");
+        DashboardSummary summary = new DashboardSummary(
+                new InsightsPeriod(LocalDate.parse("2026-10-01"), LocalDate.parse("2026-11-01")),
+                new DashboardAggregateCounts(0, 0, 0, 0),
+                null,
+                0,
+                List.of(),
+                List.of(),
+                new DashboardDataQualityCounts(0, 0, 0),
+                List.of(),
+                List.of());
+        DashboardRecentQuery query = DashboardRecentQuery.defaults();
+        when(getDashboardSummaryService.get(registeredUserId, null, null)).thenReturn(summary);
+        when(listDashboardRecentService.list(registeredUserId, query)).thenReturn(
+                new DashboardRecentPage(query.view(), new InsightsPage<>(List.of(), 0, 10, 0)));
+        MockHttpSession session = authenticatedSession();
+
+        mockMvc.perform(get("/api/dashboard/summary")
+                        .session(session)
+                        .param("userId", UUID.randomUUID().toString())
+                        .cookie(new jakarta.servlet.http.Cookie(
+                                GuestSessionCookieSupport.COOKIE_NAME, UUID.randomUUID().toString())))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.period.timezone").value("UTC"))
+                .andExpect(jsonPath("$.completedAnalyses").value(0))
+                .andExpect(jsonPath("$.matchedPercent").doesNotExist());
+        mockMvc.perform(get("/api/dashboard/recent").session(session))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.view").value("RECENT"))
+                .andExpect(jsonPath("$.content").isEmpty())
+                .andExpect(jsonPath("$.totalElements").value(0));
+
+        org.mockito.Mockito.verify(getDashboardSummaryService).get(registeredUserId, null, null);
+        org.mockito.Mockito.verify(listDashboardRecentService).list(registeredUserId, query);
+        org.mockito.Mockito.verifyNoInteractions(
+                analysisRequestOwnerResolver,
+                createAnalysisService,
+                reconcileAnalysisService,
+                requestAnalysisProcessingService,
+                getReconciliationService,
+                getDiscrepancyEvidenceService,
+                updateDiscrepancyService,
+                generateReportService,
+                getGeneratedReportService,
+                exportReconciliationCsvService,
+                revokeShareLinkService,
+                getPublicSharedReportService,
+                guestSessionCookieSupport);
+    }
+
+    @Test
+    void supplierEndpointsRequireRegisteredAuthenticationAndDoNotCreateGuestSession() throws Exception {
+        List<String> paths = List.of(
+                "/api/suppliers",
+                "/api/suppliers/acme/summary",
+                "/api/suppliers/acme/analyses");
+        for (String path : paths) {
+            for (boolean guestCookiePresent : List.of(false, true)) {
+                MockHttpServletRequestBuilder request = get(path);
+                if (guestCookiePresent) {
+                    request.cookie(new jakarta.servlet.http.Cookie(
+                            GuestSessionCookieSupport.COOKIE_NAME, UUID.randomUUID().toString()));
+                }
+                MvcResult result = mockMvc.perform(request)
+                        .andExpect(status().isUnauthorized())
+                        .andExpect(content().contentTypeCompatibleWith(APPLICATION_JSON))
+                        .andExpect(content().json("""
+                                {"code":"AUTHENTICATION_REQUIRED","message":"Authentication is required."}
+                                """))
+                        .andExpect(header().doesNotExist("Set-Cookie"))
+                        .andReturn();
+                assertNull(result.getRequest().getSession(false));
+                assertTrue(result.getResponse().getHeader("Cache-Control").contains("no-store"));
+            }
+        }
+        org.mockito.Mockito.verifyNoInteractions(
+                listSuppliersService,
+                getSupplierSummaryService,
+                listSupplierAnalysesService,
+                guestSessionCookieSupport,
+                analysisRequestOwnerResolver);
+    }
+
+    @Test
+    void registeredAccountCanReadSupplierEndpointsWithoutCsrfAndGuestCookieDoesNotChangeOwner() throws Exception {
+        UUID registeredUserId = UUID.fromString("a3d9151b-50d3-42c4-9c08-9637795af0c1");
+        SupplierKey supplierKey = new SupplierKey("acme");
+        SupplierListQuery listQuery = SupplierListQuery.of(null, null, null, null);
+        SupplierAnalysisQuery analysisQuery = SupplierAnalysisQuery.of(null, null, null, null, null);
+        when(listSuppliersService.list(registeredUserId, listQuery)).thenReturn(
+                new SupplierListPage(new InsightsPage<>(List.of(), 0, 20, 0)));
+        when(getSupplierSummaryService.get(registeredUserId, supplierKey)).thenReturn(new SupplierSummary(
+                supplierKey,
+                "ACME Supplies",
+                new SupplierAggregateCounts(1, 1, 0, 0, 0),
+                new BigDecimal("0.00"),
+                List.of(),
+                List.of(),
+                List.of(),
+                List.of()));
+        when(listSupplierAnalysesService.list(registeredUserId, supplierKey, analysisQuery)).thenReturn(
+                new SupplierAnalysisPage(supplierKey, new InsightsPage<>(List.of(), 0, 20, 0)));
+
+        MockHttpSession session = authenticatedSession();
+        jakarta.servlet.http.Cookie guestCookie = new jakarta.servlet.http.Cookie(
+                GuestSessionCookieSupport.COOKIE_NAME, UUID.randomUUID().toString());
+        mockMvc.perform(get("/api/suppliers")
+                        .session(session)
+                        .param("userId", UUID.randomUUID().toString())
+                        .cookie(guestCookie))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.content").isEmpty());
+        mockMvc.perform(get("/api/suppliers/acme/summary").session(session).cookie(guestCookie))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.supplierKey").value("acme"));
+        mockMvc.perform(get("/api/suppliers/acme/analyses").session(session).cookie(guestCookie))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(jsonPath("$.content").isEmpty());
+
+        org.mockito.Mockito.verify(listSuppliersService).list(registeredUserId, listQuery);
+        org.mockito.Mockito.verify(getSupplierSummaryService).get(registeredUserId, supplierKey);
+        org.mockito.Mockito.verify(listSupplierAnalysesService).list(registeredUserId, supplierKey, analysisQuery);
+        org.mockito.Mockito.verifyNoInteractions(guestSessionCookieSupport, analysisRequestOwnerResolver);
     }
 
     @Test

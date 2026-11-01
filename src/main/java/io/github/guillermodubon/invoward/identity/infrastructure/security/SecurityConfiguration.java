@@ -129,6 +129,13 @@ public class SecurityConfiguration {
                         .authenticated()
                         .requestMatchers(HttpMethod.GET, "/api/auth/me")
                         .authenticated()
+                        .requestMatchers(HttpMethod.GET, "/api/dashboard/summary", "/api/dashboard/recent")
+                        .authenticated()
+                        .requestMatchers(HttpMethod.GET,
+                                "/api/suppliers",
+                                "/api/suppliers/*/summary",
+                                "/api/suppliers/*/analyses")
+                        .authenticated()
                         .requestMatchers(HttpMethod.POST, "/api/analyses")
                         .permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/analyses/*/share-links")
