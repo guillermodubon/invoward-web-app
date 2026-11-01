@@ -36,6 +36,17 @@ class LayerDependencyRulesTest {
             .should().dependOnClassesThat()
             .resideInAnyPackage("..infrastructure..");
 
+    private static final ArchRule INSIGHTS_APPLICATION_MUST_REMAIN_FRAMEWORK_NEUTRAL = noClasses()
+            .that().resideInAPackage("..insights.application..")
+            .should().dependOnClassesThat()
+            .resideInAnyPackage(
+                    "org.springframework..",
+                    "org.hibernate..",
+                    "jakarta.persistence..",
+                    "jakarta.servlet..",
+                    "javax.servlet.."
+            );
+
     @Test
     void domainMustRemainIndependentFromFrameworks() {
         DOMAIN_MUST_NOT_DEPEND_ON_FRAMEWORKS.check(PRODUCTION_CLASSES);
@@ -54,5 +65,10 @@ class LayerDependencyRulesTest {
     @Test
     void apiMustNotDependOnInfrastructure() {
         API_MUST_NOT_DEPEND_ON_INFRASTRUCTURE.check(PRODUCTION_CLASSES);
+    }
+
+    @Test
+    void insightsApplicationMustRemainFrameworkNeutral() {
+        INSIGHTS_APPLICATION_MUST_REMAIN_FRAMEWORK_NEUTRAL.check(PRODUCTION_CLASSES);
     }
 }

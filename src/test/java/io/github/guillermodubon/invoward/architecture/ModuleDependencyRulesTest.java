@@ -74,6 +74,36 @@ class ModuleDependencyRulesTest {
             .should().dependOnClassesThat()
             .resideInAPackage("..sharing..");
 
+    private static final ArchRule INSIGHTS_MUST_NOT_DEPEND_ON_UNAPPROVED_MODULES = noClasses()
+            .that().resideInAPackage("..insights..")
+            .should().dependOnClassesThat()
+            .resideInAnyPackage(
+                    "..identity..",
+                    "..document..",
+                    "..extraction..",
+                    "..reporting..",
+                    "..sharing..",
+                    "..processing..",
+                    "..notification..",
+                    "..shared.."
+            );
+
+    private static final ArchRule OTHER_MODULES_MUST_NOT_DEPEND_ON_INSIGHTS = noClasses()
+            .that().resideInAnyPackage(
+                    "..identity..",
+                    "..document..",
+                    "..analysis..",
+                    "..extraction..",
+                    "..reconciliation..",
+                    "..reporting..",
+                    "..processing..",
+                    "..sharing..",
+                    "..notification..",
+                    "..shared.."
+            )
+            .should().dependOnClassesThat()
+            .resideInAPackage("..insights..");
+
     private static final ArchRule MODULES_MUST_BE_FREE_OF_CYCLES = slices()
             .matching(BASE_PACKAGE + ".(*)..")
             .should().beFreeOfCycles();
@@ -106,5 +136,15 @@ class ModuleDependencyRulesTest {
     @Test
     void otherModulesMustNotDependOnSharing() {
         OTHER_MODULES_MUST_NOT_DEPEND_ON_SHARING.check(PRODUCTION_CLASSES);
+    }
+
+    @Test
+    void insightsMayOnlyDependOnApprovedModules() {
+        INSIGHTS_MUST_NOT_DEPEND_ON_UNAPPROVED_MODULES.check(PRODUCTION_CLASSES);
+    }
+
+    @Test
+    void otherModulesMustNotDependOnInsights() {
+        OTHER_MODULES_MUST_NOT_DEPEND_ON_INSIGHTS.check(PRODUCTION_CLASSES);
     }
 }
